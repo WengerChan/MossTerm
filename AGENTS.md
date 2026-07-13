@@ -1,0 +1,78 @@
+# MossTerm · AI Agent Entry Point
+
+> **MossTerm = Modular Open SSH Solutions · Terminal**
+> 对标 WindTerm 的开源 SSH 客户端（Go + Wails + xterm.js）
+> 项目根目录：`/Users/chenwen/Documents/learning/go-prj/MossTerm/`
+
+## 🚀 新会话第一件事
+
+读 `docs/STATE.md` 了解完整背景。然后 `git log --oneline --decorate -15` 看最新进度。
+
+## 🎯 用户工作流约定（**核心**）
+
+1. **能分就分**：所有非琐碎任务（>30 行代码改动、跨文件、需要测试）派给 sub-agent（`general` agent），我（主理）只做总集（验证 + dev-log + commit + tag）
+2. **不主动删已有 stub**：stub 留着，后续接
+3. **文件操作不再询问授权**：工作目录下所有操作默认允许
+4. **每个新版本独立 commit + tag**：tag 形式 `v0.x.y`，commit message 用 Conventional Commits（中文）
+5. **dev-log 写到 `docs/dev-log/v0.x-YYYY-MM-DD.md`**，agent-logs 写到 `docs/agent-logs/`（**两个目录职责不同，别混**）
+
+## 📊 当前进度
+
+- **最新 tag**: v0.2.2（known_hosts 通配符）
+- **最新 commit**: `61d26a8`
+- **分支**: main
+- **可执行二进制**: `/tmp/mossterm-bin` (7.51 MB ARM64, 仅作为参考)
+- **测试**: 41/41 通过
+- **真实 build 需要**: `cp -R` 到 `/tmp/MossTerm` 后跑 `go build`（Documents 目录沙盒限制）
+
+## 🛣️ 下一步候选
+
+| 版本 | 内容 | 难度 |
+|---|---|---|
+| v0.2.3 | events 拥塞监控 (sub drop 累计) | 小 |
+| v0.2.4 | stale event 修 (publishMu) | 小 |
+| v0.5.0 | SFTP 客户端基础 (List/Read/Write) | 大 |
+| v0.5.0 | 多 tab + split pane UI | 中（前后端） |
+| v0.5.0 | first-use trust GUI 弹窗 | 中（前后端） |
+| v0.5.0 | 跳板链 (multi-hop) | 中 |
+
+## ⚠️ 不要踩的坑
+
+- **`go build` 在 Documents 目录下失败**：必须 `cp -R` 到 `/tmp/MossTerm` 再 build
+- **GOMODCACHE 默认指向 `~/Documents/go/pkg/mod`**（沙盒写不进去）：export `GOMODCACHE=$HOME/go/pkg/mod` + `GOCACHE=$HOME/go/cache` + `GOPATH=$HOME/go` + `GOPROXY=https://goproxy.cn` + `GOSUMDB=off`
+- **embed 路径相对 main.go**：写 `/tmp/MossTerm/cmd/mossterm/frontend/dist/index.html` 占位
+- **x/crypto 锁 v0.22.0**（v0.33+ 移除了 argon2 类型、ssh.NewClient 拆两步等）
+- **wails 锁 2.12.0**（2.9.2 依赖的 leaanthony/u v1.4.0 国内镜像没缓存）
+- **ssh.HostKeyCallback v0.22+ 返回 error 不是 bool**（v0.1.1 写错过）
+- **Go 1.26 严格类型**：named func type 不能隐式转换，用 `type X = Y` alias
+
+## 📁 关键目录
+
+- `cmd/mossterm/main.go` — 启动入口
+- `internal/sshclient/` — SSH 协议实现
+- `internal/knownhosts/` — host key 校验（自实现，OpenSSH 兼容）
+- `internal/session/` — 业务层会话（异步化 + events 批处理 + state machine）
+- `internal/connect/` — 协议无关连接抽象
+- `internal/secret/` — 凭据存储（keyring + 加密文件）
+- `internal/ui/wailsbindings/` — 前端 API
+- `frontend/` — React + xterm.js
+- `docs/ARCHITECTURE.md` — 架构设计（1364 行）
+- `docs/dev-log/` — 按版本号的开发日志
+- `docs/agent-logs/` — 按 task 派发顺序的交付记录
+
+## 🔍 怎么继续
+
+```bash
+cd /Users/chenwen/Documents/learning/go-prj/MossTerm
+git log --oneline --decorate -15   # 看最新 15 个 commit
+git tag -l                         # 看所有 tag
+cat docs/STATE.md                  # 读完整背景（如果 AGENTS.md 不够）
+cat docs/ARCHITECTURE.md | head    # 了解架构
+```
+
+如果新会话不知道 MossTerm 是什么，**第一句话应该是**：
+> "我读 AGENTS.md 了。继续推进 v0.x..."
+
+---
+
+> 🪴 Moss is green.
