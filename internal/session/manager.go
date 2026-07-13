@@ -123,18 +123,41 @@ func (m *MemoryManager) WithKnownHosts(kh *knownhosts.Manager) *MemoryManager {
 
 // Open 实现 Manager.Open。
 //
-// 流程：
+// v0.2.0a 重构：dial / OpenSession 改为后台 goroutine 异步执行，
+// Open 立即返回 session 实例。状态机显式化：
+//
+//	Connecting (初始) → Authenticating (Dial 成功) → Established (OpenSession 成功)
+//	                                                                  ↘
+//	                                                                   Failed (任一步失败)
+//
+// 同步阶段（Open 内）：
 //  1. 校验 req
 //  2. 生成 UUID 作为 session ID
 //  3. 解析 dialParams + sessionOpts
-//  4. 从 connectors registry 查 "ssh" scheme 的 factory
-//  5. 用 factory(deps) 构造一个 sshclient.Connector
-//  6. 同步执行 connector.Dial + connector.OpenSession
-//     （任何一步失败都把 session 从 m.sessions 移除并返回 error）
-//  7. 构造 sessionImpl，把 dialed/sess 注入
-//  8. s.Start(ctx) 启动 read/write/fanout loop
-//  9. 注册到 m.sessions
-//  10. 返回
+//  4. 从 registry 查 "ssh" factory；factory(deps) 构造 connector（struct 构造，毫秒级）
+//  5. NewSessionImpl（初始 state=Connecting）+ 注册到 m.sessions
+//  6. s.Start(ctx) 启动 readLoop / writeLoop / fanoutLoop
+//     （readLoop / writeLoop 在 waitForSess 阻塞；fanoutLoop 立即可用，
+//     保证后续 state 事件能立即 broadcast 给 subscriber）
+//  7. 启动后台 dialInBackground goroutine
+//  8. 返回 session
+//
+// 异步阶段（dialInBackground goroutine 内）：
+//  9.  connector.Dial → 失败：state=Failed + signalDone
+//  10. state=Authenticating + tryPublish
+//  11. connector.OpenSession → 失败：conn.Close + state=Failed + signalDone
+//  12. SetDialedSess(conn, sshSess) + state=Established + tryPublish
+//
+// 失败时 session 保留在 m.sessions（caller 仍可 Get + 查 Info），由 caller
+// 决定是否调用 Close 清理 —— v0.2.0a 不自动 Close。
+//
+// 关闭中 dial 的处理：dialInBackground 在每次状态转换前检查 s.state，
+// 若已被 Close 抢先（state=Closing/Closed），释放已分配资源后退出。
+// 这保证 Close 在 dial 中途被调用时不会泄漏 conn。
+//
+// 边界：
+//   - dial 自身的 ctx 是 caller 传入的；Close 不取消 ctx。
+//     若要立即终止长时间 dial，caller 应传入带超时的 ctx 或自行 cancel。
 func (m *MemoryManager) Open(ctx context.Context, req OpenRequest) (Session, error) {
 	// 1. 校验
 	if err := validateOpenRequest(req); err != nil {
@@ -165,29 +188,15 @@ func (m *MemoryManager) Open(ctx context.Context, req OpenRequest) (Session, err
 		return nil, errors.New("session.MemoryManager.Open: no factory registered for scheme \"ssh\"")
 	}
 	deps := connect.StdDeps()
-	deps.Secrets = secrets      // 注入凭据存储（publickey 用）
+	deps.Secrets = secrets       // 注入凭据存储（publickey 用）
 	deps.KnownHosts = knownHosts // 注入 known_hosts（host key 校验）
 	connector, err := factory(deps)
 	if err != nil {
 		return nil, fmt.Errorf("session.MemoryManager.Open: build ssh connector: %w", err)
 	}
 
-	// 5. Dial（同步）
-	conn, err := connector.Dial(ctx, dialParams)
-	if err != nil {
-		return nil, fmt.Errorf("session.MemoryManager.Open: dial: %w", err)
-	}
-
-	// 6. OpenSession（同步）—— 失败必须回滚 conn
-	sess, err := connector.OpenSession(ctx, conn, sessionOpts)
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("session.MemoryManager.Open: open session: %w", err)
-	}
-
-	// 7. 构造 sessionImpl
+	// 5. 构造 sessionImpl，初始 state=Connecting
 	now := time.Now().UnixMilli()
-	initialState := StateEstablished // Dial + OpenSession 已成功
 	port := req.Port
 	if port == 0 {
 		port = 22
@@ -199,20 +208,21 @@ func (m *MemoryManager) Open(ctx context.Context, req OpenRequest) (Session, err
 		Port:      port,
 		User:      req.User,
 		Protocol:  "ssh",
-		State:     initialState,
+		State:     StateConnecting,
 		CreatedAt: now,
 		Cols:      sessionOpts.Cols,
 		Rows:      sessionOpts.Rows,
 	}
 	s := NewSessionImpl(id, connector, dialParams, sessionOpts, info)
-	s.SetDialedSess(conn, sess)
 
-	// 8. 注册（在 Start 之前，避免 Start 启动的 goroutine 看到没注册的 session）
+	// 6. 注册（在 Start 之前 —— Start 启动的 fanoutLoop 需要 session 已可见，
+	//    否则 dial 期间 tryPublish 的 state 事件进 events 通道却没人接收）
 	m.mu.Lock()
 	m.sessions[id] = s
 	m.mu.Unlock()
 
-	// 9. Start 启动 loop —— 失败则回滚
+	// 7. 启动 3 个 loop。fanoutLoop 立即可用；readLoop/writeLoop 在
+	//    waitForSess 阻塞直到 SetDialedSess。
 	if err := s.Start(ctx); err != nil {
 		m.mu.Lock()
 		delete(m.sessions, id)
@@ -221,13 +231,109 @@ func (m *MemoryManager) Open(ctx context.Context, req OpenRequest) (Session, err
 		return nil, fmt.Errorf("session.MemoryManager.Open: start: %w", err)
 	}
 
-	slog.Default().Info("session opened",
+	// 8. 启动后台 dial goroutine
+	go m.dialInBackground(ctx, s, dialParams, sessionOpts)
+
+	slog.Default().Info("session open started",
 		"id", string(id),
 		"host", req.Host,
 		"port", port,
 		"user", req.User,
 	)
 	return s, nil
+}
+
+// dialInBackground 是 Open 启动的后台 goroutine，负责 dial + OpenSession。
+//
+// 状态转换：
+//
+//	Connecting → (Dial 成功) → Authenticating → (OpenSession 成功) → Established
+//	任意阶段失败 → Failed
+//
+// 失败时 s.signalDone 关闭 s.done —— 让 readLoop / writeLoop / fanoutLoop 退出。
+// 之前已注册的 subscriber 仍可通过 Info().State 看到 Failed（state 事件已 publish）。
+//
+// 关闭语义 + race 处理：
+//   每一步状态转换用 setStateIf（CAS）做"check-and-set"——如果 Close 已经
+//   抢先把 state 推到 Closing/Closed，CAS 失败，本 goroutine 释放已分配资源
+//   （conn.Close / sshSess.Close）后退出，不覆盖 Close 写入的 Closed。
+//
+//   这避免了 v0.1.x 那种"A: isClosedOrClosing()=false / B: Close 把 state→Closed
+//   / A: setState(Authenticating) 覆盖 Closed"的 race（subscriber 会看到
+//   Connecting → Closed → Authenticating 的荒谬时序）。
+//
+// 边界：
+//   - dial 自身的 ctx 是 caller 传入的；Close 不取消 ctx。
+//     若需立即取消长时间 dial，caller 应传入带超时的 ctx 或自行 cancel。
+func (m *MemoryManager) dialInBackground(
+	ctx context.Context,
+	s *sessionImpl,
+	dialParams connect.DialParams,
+	opts connect.SessionOpts,
+) {
+	// 1. Dial
+	conn, err := s.conn.Dial(ctx, dialParams)
+	if err != nil {
+		// CAS(Connecting, Failed)：若 state 已被 Close 推到 Closing/Closed 则失败，
+		// 直接退出（Close 会处理关闭流程）。
+		if !s.setStateIf(StateConnecting, StateFailed) {
+			return
+		}
+		s.tryPublish(newStateEvent(StateFailed))
+		s.signalDone() // 唤醒 readLoop / writeLoop / fanoutLoop
+		slog.Default().Warn("session dial failed",
+			"id", string(s.id),
+			"host", s.info.Load().Host,
+			"err", err,
+		)
+		return
+	}
+
+	// 2. Connecting → Authenticating
+	//    失败说明 Close 已抢先（state=Closing/Closed）；释放 conn 防止泄漏。
+	if !s.setStateIf(StateConnecting, StateAuthenticating) {
+		_ = conn.Close()
+		return
+	}
+	s.tryPublish(newStateEvent(StateAuthenticating))
+
+	// 3. OpenSession
+	sshSess, err := s.conn.OpenSession(ctx, conn, opts)
+	if err != nil {
+		_ = conn.Close()
+		// CAS(Authenticating, Failed)：state 已被 Close 推到 Closing/Closed 则失败。
+		if !s.setStateIf(StateAuthenticating, StateFailed) {
+			return
+		}
+		s.tryPublish(newStateEvent(StateFailed))
+		s.signalDone()
+		slog.Default().Warn("session open session failed",
+			"id", string(s.id),
+			"host", s.info.Load().Host,
+			"err", err,
+		)
+		return
+	}
+
+	// 4. OpenSession 成功；先 SetDialedSess 激活 readLoop/writeLoop，
+	//    再 CAS(Authenticating, Established)。
+	//
+	//    SetDialedSess 在 CAS 之前的好处：即使 Close 在中间抢跑（CAS 失败），
+	//    conn/sshSess 已在 s.sess/s.dialed 中；Close 的 connMu.Lock 会
+	//    拿走引用并 close，不泄漏。
+	s.SetDialedSess(conn, sshSess)
+
+	// CAS(Authenticating, Established)：Close 抢先则失败；conn/sess 已被
+	// Close 取走并 close（见上），本 goroutine 直接退出。
+	if !s.setStateIf(StateAuthenticating, StateEstablished) {
+		return
+	}
+	s.tryPublish(newStateEvent(StateEstablished))
+
+	slog.Default().Info("session established",
+		"id", string(s.id),
+		"host", s.info.Load().Host,
+	)
 }
 
 // validateOpenRequest 校验 OpenRequest 的必填字段。

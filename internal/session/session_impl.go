@@ -1,13 +1,15 @@
 // session_impl.go 实现 session.Session 接口。
 //
-// 生命周期：
+// 生命周期（v0.2.0a 重构）：
 //
 //	Manager.Open(ctx, req)
-//	  ├─ 构造 sessionImpl（id / info / connector / dialParams / sessionOpts）
-//	  ├─ connector.Dial(ctx, dialParams)        ─┐
-//	  ├─ connector.OpenSession(ctx, conn, opts)  │ 这两步骤由 Open 同步执行
-//	  ├─ state 推到 Established                  ─┘
-//	  └─ s.Start(ctx)  启动 readLoop / writeLoop / fanoutLoop
+//	  ├─ 同步：validate / uuid / 转换 / factory / NewSessionImpl / 注册
+//	  ├─ 同步：s.Start(ctx) 启动 readLoop / writeLoop / fanoutLoop
+//	  │        （fanoutLoop 立即可用；readLoop/writeLoop 在 waitForSess 阻塞）
+//	  └─ 异步（dialInBackground goroutine）：
+//	       ├─ connector.Dial → state=Authenticating → connector.OpenSession
+//	       ├─ SetDialedSess → state=Established   （成功路径）
+//	       └─ state=Failed + signalDone            （任意一步失败）
 //	                                                    ↓
 //	                                          全部 session 通过 events 通道汇聚
 //	                                          → fanout → 广播给各 subscriber
@@ -110,7 +112,7 @@ type sessionImpl struct {
 	dialed net.Conn
 	sess   connect.Session
 
-	// 拨号参数（Open 时定，Start 时使用）。
+	// 拨号参数（Open 时定，dialInBackground 时使用）。
 	dialParams  connect.DialParams
 	sessionOpts connect.SessionOpts
 
@@ -126,7 +128,12 @@ type sessionImpl struct {
 	done    chan struct{}
 
 	// 一次性触发。
+	//
+	// closeOnce 保护整个 Close 流程（多次 Close 调用幂等）。
+	// doneOnce 专门保护 close(s.done)：v0.2.0a 起 Close 和
+	// dialInBackground 失败路径都可能触发，用 sync.Once 防止 panic。
 	closeOnce sync.Once
+	doneOnce  sync.Once
 	started   atomic.Bool
 
 	// Fan-out。
@@ -155,11 +162,24 @@ type sessionImpl struct {
 
 // Start 启动 readLoop / writeLoop / fanoutLoop 三个 goroutine。
 //
-// 设计说明：Manager.Open 已经同步完成 Dial + OpenSession 并把 state
-// 推到 Established；Start 不再处理握手，只负责循环 IO 与事件分发。
-// 这样保持 3 个 goroutine 的"最小集合"，与架构文档一致。
+// v0.2.0a 行为变更：Start 由 MemoryManager.Open 在注册 session 后立即同步调用，
+// 不再由外部 caller 调用。重复调用 / 外部调用均返回 "already started" error。
+// 签名保留是为了符合 Session 接口契约。
 //
-// 多次调用 Start 只会启动一次（started 保护），第二次返回 error。
+// 启动时机与生命周期：
+//   - Open 注册 session 到 m.sessions 之后立即调用（同步）
+//   - 此时 s.sess 还是 nil；readLoop / writeLoop 在 waitForSess 阻塞
+//   - dialInBackground 在 SetDialedSess(conn, sess) 后，readLoop/writeLoop 解除阻塞
+//
+// 为什么在 Open 同步阶段就调 Start（而不是等 dial 完成后）：
+//   - fanoutLoop 在 Open 返回时已经运行；后续 state 事件能立即广播给 subscriber
+//     （state 事件在 dialInBackground 里 tryPublish）
+//   - 如果等 dial 完成后才调 Start，那段窗口内的 Connecting → Authenticating
+//     状态转换会丢失（fanoutLoop 没起，无法 broadcast）
+//   - 失败路径（dial 失败 / OpenSession 失败）由 dialInBackground 调
+//     signalDone 关闭 s.done；readLoop / writeLoop / fanoutLoop 自然退出
+//
+// 多次调用 Start 只会启动一次（started.CompareAndSwap 保护），第二次返回 error。
 func (s *sessionImpl) Start(_ context.Context) error {
 	if !s.started.CompareAndSwap(false, true) {
 		return errors.New("session: already started")
@@ -277,7 +297,7 @@ func (s *sessionImpl) Close(_ bool) error {
 		}
 
 		// 唤醒 fanoutLoop / writeLoop / readLoop
-		close(s.done)
+		s.signalDone()
 
 		// 最后状态
 		s.setState(StateClosed)
@@ -295,9 +315,17 @@ func (s *sessionImpl) Close(_ bool) error {
 }
 
 // Info 返回当前 session 元数据快照（原子读）。
+//
+// v0.2.0a 行为变更：info.State 字段与 s.state 保持同步（每次读都从
+// atomic.Int32 拉），caller 通过 Info().State 看到的总是最新状态。
+// v0.1.x 的实现把 State 缓存在 Info 里，状态转换后 Info().State 仍是
+// 初始值（Connecting），导致前端看不到 Authenticating / Established 转换。
+// 本次重构顺手修复。
 func (s *sessionImpl) Info() Info {
 	if p := s.info.Load(); p != nil {
-		return *p
+		info := *p
+		info.State = State(s.state.Load()) // v0.2.0a: 动态 state（不再缓存）
+		return info
 	}
 	return Info{}
 }
@@ -314,6 +342,49 @@ func (s *sessionImpl) State() State {
 // setState 原子地更新状态。
 func (s *sessionImpl) setState(st State) {
 	s.state.Store(int32(st))
+}
+
+// setStateIf 原子地比较并设置 state：仅当当前 state 等于 expect 时才改为 to。
+// 返回 true 表示 CAS 成功。
+//
+// v0.2.0a 新增：dialInBackground 用它防止"setState 覆盖 Closed" race。
+//
+// race 场景（v0.1.x 不存在，v0.2.0a 异步 dial 后才出现）：
+//
+//	goroutine A (dialInBackground): isClosedOrClosing()=false  (state=Connecting)
+//	goroutine B (Close):            setState(Closing) → setState(Closed)
+//	goroutine A:                    setState(Authenticating)  ❌ 覆盖 Closed
+//	goroutine A:                    tryPublish(Authenticating)  ❌ 发出过期事件
+//
+// CAS 把"检查+设置"合并成原子操作：若 Close 抢先，state 已不是 expect，
+// setStateIf 失败，dialInBackground 不发布 state event、释放已分配资源后退出。
+//
+// 边界情况：CAS 成功之后 Close 才抢先（A 已发布 Authenticating event，
+// 之后 state 被 B 改成 Closing/Closed）。这种情况下 subscriber 会看到
+// 一个"过期"事件 —— 但 Info().State 仍是 Closed，subscriber 自身应
+// 丢弃这种"事件 state 早于 Info().State"的不一致。完全消除需要把
+// setState + tryPublish 放在同一把锁里（Close 也得拿），属于 v0.2.x
+// 范围之外的过度设计。
+//
+// 注意：Close 自己用 closeOnce 序列化整个 Close 流程，无须走 CAS。
+func (s *sessionImpl) setStateIf(expect, to State) bool {
+	return s.state.CompareAndSwap(int32(expect), int32(to))
+}
+
+// signalDone 一次性关闭 s.done channel。
+//
+// v0.2.0a 新增：Close 和 dialInBackground 失败路径都会调用；用 doneOnce
+// 保护避免重复 close 引发 panic。
+//
+// 调用场景：
+//   - Close 路径：state → Closing → 释放 conn/sess → signalDone → state → Closed
+//   - dialInBackground 失败路径：state → Failed → signalDone（让 readLoop /
+//     writeLoop / fanoutLoop 退出；session 保留在 m.sessions 供 caller 查询）
+//
+// 调用此方法前应当确认已设置好最终 state（Closed 或 Failed），方便
+// 还在轮询 waitForSess 的协程看到正确的退出原因。
+func (s *sessionImpl) signalDone() {
+	s.doneOnce.Do(func() { close(s.done) })
 }
 
 // tryPublish 非阻塞地往 events 通道发送一个事件。
@@ -586,11 +657,18 @@ func (s *sessionImpl) maybeEmitOverflow() {
 }
 
 // waitForSess 轮询等待 s.sess 就绪，返回 nil 表示 session 已关闭。
+//
+// v0.2.0a 行为变更：增加 StateFailed 退出条件。当 dialInBackground 把
+// state 推到 Failed（dial 失败 / OpenSession 失败）时，readLoop / writeLoop
+// 不应继续轮询等待 sess —— 失败后 s.sess 永远不会被设置，必须靠 s.done 唤醒。
+// dialInBackground 失败时会先 setState(Failed) 再 signalDone；这里同时
+// 查 state 是为了减少 wakeup latency。
 func (s *sessionImpl) waitForSess() connect.Session {
 	t := time.NewTicker(sessReadyPollInterval)
 	defer t.Stop()
 	for {
-		if State(s.state.Load()) == StateClosed {
+		st := State(s.state.Load())
+		if st == StateClosed || st == StateFailed {
 			return nil
 		}
 		s.connMu.RLock()
