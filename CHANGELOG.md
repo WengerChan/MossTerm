@@ -73,6 +73,39 @@
 - ⚠️ `Manager.Open` 同步执行 dial，订阅者看不到 `Connecting` / `Authenticating` 中间状态
 - ⚠️ SFTP 客户端未实现（推到 v0.5）
 
+## [v0.2.0] - 2026-07-13
+
+### Added
+- events 批处理：16ms ticker + 64KB accumulator
+  - 1000+ events/sec 压缩到 ~60 events/sec
+  - 典型终端吞吐上限 4MB/s，超出触发 overflow
+- `session:overflow` 事件类型
+  - `Event.OverflowBytes int64` 字段
+  - `EventTypeOverflow` 常量 + `newOverflowEvent` helper
+  - fanoutLoop 旁路 emit（不走 events 通道）
+- `internal/session/session_impl_test.go` — 6 个单元测试
+
+### Changed
+- `readLoop` 重写为 reader goroutine + main loop 双层结构
+  - reader goroutine 持续 `sess.Read(32KB)`
+  - dataCh(cap=8) 把 data 传给 main loop
+  - main loop accumulator + ticker 16ms flush
+  - 超 64KB 立即 flush（避免单次 broadcast 引发前端卡顿）
+- `tryPublish` 累计 overflow 字节数（不再静默丢）
+- `fanoutLoop` 每次 broadcast 后调 `maybeEmitOverflow`
+
+### Fixed
+- 🐛 `tryPublish` 关停时 1/3 概率误报 overflow（v0.1.4 就有）
+  - Go runtime 在多 case select 中均匀随机选，1/3 概率选到 default
+  - 修复：default 分支加内层 `select { case <-s.done: ... default: ... }` 区分
+
+### Performance
+- 1000+ events/sec → ~60 events/sec（16ms 批处理 + 64KB accumulator）
+- events 通道打满概率显著降低
+- 单 session 稳态吞吐 4MB/s（典型终端 < 100KB/s）
+
+详细 dev-log：[`docs/dev-log/v0.2.0-2026-07-13.md`](./docs/dev-log/v0.2.0-2026-07-13.md)
+
 ## [v0.1.4] - 2026-07-13
 
 ### Added

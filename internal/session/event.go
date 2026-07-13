@@ -39,10 +39,15 @@ const (
 	// Error 事件后，Session 会自动进入 Closing → Closed 状态。
 	EventTypeError EventType = "error"
 
-	// EventTypeOverflow 是预留事件类型（v0.2+ 启用）。
+	// EventTypeOverflow 表示 events 通道发生过丢数据。
 	//
-	// 当 readLoop 累积的未消费数据超过阈值时会 emit，提醒前端做丢帧。
-	// v0.1 的实现是直接丢最早数据 + 静默，不 emit 此事件。
+	// 当中央 events 通道（cap=64）被 readLoop 的 batched data event 撑满时，
+	// 后续整批 data 会被 tryPublish 丢弃，并累加字节数到 overflowBytes。
+	// fanoutLoop 在每条事件广播后会检查并 emit 一个 overflow 事件，
+	// 携带自上次上报以来丢弃的总字节数，提醒前端做丢帧/告警。
+	//
+	// 触发场景：cat GB 级日志、tail -f 高频输出等"远端 > 后端 fanout 能力"
+	// 的极端情况；正常交互式终端不会触发。
 	EventTypeOverflow EventType = "overflow"
 )
 
@@ -85,5 +90,17 @@ func newExitEvent(msg string) Event {
 		Type:    string(EventTypeExit),
 		ExitMsg: msg,
 		At:      time.Now().UnixMilli(),
+	}
+}
+
+// newOverflowEvent 构造一个 overflow 事件，携带自上次上报以来
+// 因 events 通道满而丢失的字节总数。
+//
+// helper 集中在这里避免在 fanoutLoop 里写 Event 字面量。
+func newOverflowEvent(droppedBytes int64) Event {
+	return Event{
+		Type:          string(EventTypeOverflow),
+		OverflowBytes: droppedBytes,
+		At:            time.Now().UnixMilli(),
 	}
 }

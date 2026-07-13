@@ -109,14 +109,18 @@ type Resize struct {
 
 // Event 是 Session 推送给订阅者的消息。
 //
-// type 取值："data" | "state" | "exit" | "error"；其余字段按 type 解释。
+// type 取值："data" | "state" | "exit" | "error" | "overflow"；其余字段按 type 解释。
+//
+// overflow 类型（v0.2+）：Data / State / ExitMsg / Err 均为零值，
+// OverflowBytes 携带自上次上报以来因 events 通道满而被丢弃的字节总数。
 type Event struct {
-	Type    string `json:"type"`
-	Data    []byte `json:"data,omitempty"`
-	State   State  `json:"state,omitempty"`
-	ExitMsg string `json:"exitMsg,omitempty"`
-	Err     string `json:"err,omitempty"`
-	At      int64  `json:"at"`
+	Type          string `json:"type"`
+	Data          []byte `json:"data,omitempty"`
+	State         State  `json:"state,omitempty"`
+	ExitMsg       string `json:"exitMsg,omitempty"`
+	Err           string `json:"err,omitempty"`
+	OverflowBytes int64  `json:"overflowBytes,omitempty"`
+	At            int64  `json:"at"`
 }
 
 // Session 是 MossTerm 业务层会话。
