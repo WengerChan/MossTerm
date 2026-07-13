@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/mossterm/mossterm/internal/connect"
+	"github.com/mossterm/mossterm/internal/knownhosts"
 	"github.com/mossterm/mossterm/internal/secret"
 )
 
@@ -27,6 +28,7 @@ import (
 //   - bannerCb：服务端 banner 回调。
 //   - keepAlive / dialTimeout：默认心跳与拨号超时，可在 DialParams 中覆盖。
 //   - secrets：凭据存储，用于解析 publickey auth 时的私钥。
+//   - knownHosts：known_hosts 文件管理器（v0.1.3+）。
 //   - signerCache：缓存按 KeyID→Signer 解析过的 ssh.Signer，
 //     避免每次连接都重新打开 secret store。
 type Connector struct {
@@ -35,13 +37,16 @@ type Connector struct {
 	keepAlive   time.Duration
 	dialTimeout time.Duration
 	secrets     secret.Store
+	knownHosts  *knownhosts.Manager
 	signerCache *lru.Cache[string, ssh.Signer]
 }
 
 // New 构造一个 SSH Connector。
 //
-// deps.HostKeyCb 为 nil 时使用 InsecureIgnoreHostKey 作为兜底（仅 v0.1）。
-// TODO(security): 接入 known_hosts 持久化与"首次信任"对话框。
+// host key 校验优先级：
+//  1. d.KnownHosts（v0.1.3+）→ 自动 Add 未知 host
+//  2. d.HostKeyCb（v0.1.1）→ 外部注入
+//  3. 兜底 InsecureIgnoreHostKey（v0.1 行为，⚠️ MITM 风险）
 //
 // deps.Secrets 用于 publickey 认证：nil 时 publickey 路径会返回明确错误。
 func New(d connect.Deps) (*Connector, error) {
@@ -57,12 +62,25 @@ func New(d connect.Deps) (*Connector, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sshclient.New: lru init: %w", err)
 	}
+
+	// 解析 host key callback 优先级
+	var hostKeyCb connect.HostKeyCallback
+	switch {
+	case d.KnownHosts != nil:
+		hostKeyCb = d.KnownHosts.HostKeyCallback()
+	case d.HostKeyCb != nil:
+		hostKeyCb = d.HostKeyCb
+	default:
+		hostKeyCb = ssh.InsecureIgnoreHostKey()
+	}
+
 	return &Connector{
-		hostKeyCb:   d.HostKeyCb,
+		hostKeyCb:   hostKeyCb,
 		bannerCb:    d.BannerCb,
 		keepAlive:   keepAlive,
 		dialTimeout: dialTimeout,
 		secrets:     d.Secrets,
+		knownHosts:  d.KnownHosts,
 		signerCache: cache,
 	}, nil
 }
@@ -110,17 +128,9 @@ func (c *Connector) Dial(ctx context.Context, params connect.DialParams) (net.Co
 		Timeout: timeout,
 	}
 
-	// Host key 校验：优先用外部回调，否则兜底放行（v0.1）。
-	if c.hostKeyCb != nil {
-		// connect.HostKeyCallback 已经是 ssh.HostKeyCallback 的 alias，
-		// 直接赋值即可。
-		cfg.HostKeyCallback = c.hostKeyCb
-	} else {
-		// TODO(security): 接入 known_hosts（v0.2+）：
-		//   1. 启动时 load ~/.config/mossterm/known_hosts
-		//   2. 命中则返回 true；未命中 + 严格模式 = 拒绝；未命中 + 宽松 = 写入并返回 true
-		cfg.HostKeyCallback = ssh.InsecureIgnoreHostKey()
-	}
+	// Host key 校验：c.hostKeyCb 在 New 时已根据 KnownHosts / HostKeyCb / 兜底
+	// 三个优先级确定。直接赋值。
+	cfg.HostKeyCallback = c.hostKeyCb
 
 	// Banner 回调：把服务端 banner 推给上层（log:line / ui）。
 	if c.bannerCb != nil {

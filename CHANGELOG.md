@@ -73,6 +73,38 @@
 - ⚠️ `Manager.Open` 同步执行 dial，订阅者看不到 `Connecting` / `Authenticating` 中间状态
 - ⚠️ SFTP 客户端未实现（推到 v0.5）
 
+## [v0.1.3] - 2026-07-13
+
+### Added
+- `internal/knownhosts` 包：known_hosts 持久化 + 智能 HostKeyCallback
+  - 自动创建文件（父目录 0700，文件 0600）
+  - 解析 OpenSSH 格式（忽略 marker / 通配符）
+  - `HostKeyCallback()` 返回 `ssh.HostKeyCallback`（error 语义）
+  - `Add(host, key, comment)` 显式添加
+  - `Authorize(host, key)` 显式校验
+  - `ErrHostUnknown` / `ErrHostKeyMismatch` 错误
+- `connect.Deps.KnownHosts *knownhosts.Manager` 字段
+- `sshclient.Connector.knownHosts` 字段 + 3 级 host key 优先级解析
+- `session.MemoryManager.WithKnownHosts(kh)` 注入器
+- `cmd/mossterm/main.go` 初始化 known_hosts（默认 `~/.config/mossterm/known_hosts`）
+- 5 个 knownhosts 单元测试（empty path / 创建文件 / Add+callback / load / 持久化）
+
+### Changed
+- `sshclient.New` 不再做 `InsecureIgnoreHostKey` 兜底（已移到 `New` 集中处理）
+- host key 校验逻辑三层优先级：KnownHosts > HostKeyCb > 兜底
+
+### Security
+- 🔴 **消除 MITM 风险**：host key 不再默认放行
+- 首次连接自动信任 + 写入（first-use trust）
+- host key 改变时**明确拒绝**并返回 `ErrHostKeyMismatch`
+- v0.1.1 / v0.1.2 的 `InsecureIgnoreHostKey` 兜底仅在 `KnownHosts=nil && HostKeyCb=nil` 时生效
+
+### Known Limitations
+- ⚠️ 不支持 OpenSSH 完整格式（通配符 / 端口 / IP 范围）—— v0.2 评估
+- ⚠️ first-use trust 无 GUI 确认 —— v0.2 加弹窗
+
+详细 dev-log：[`docs/dev-log/v0.1.3-2026-07-13.md`](./docs/dev-log/v0.1.3-2026-07-13.md)
+
 ## [v0.1.2] - 2026-07-13
 
 ### Added
@@ -94,7 +126,7 @@
 - publickey 私钥在内存中只存已解析的 `ssh.Signer`，不存明文
 - `signerCache` 是 per-connector LRU（cap 64），不是全局共享
 
-详细 dev-log：[`docs/dev-log/v0.1.2-2026-07-13.md`](./docs/dev-log/v0.1.2-2026-07-13.md)
+详细 dev-log：[`docs/dev-log/v0.1.2-2026-07-13.md`](./docs/dev-log/v0.1.2-2026-07.13.md)
 
 ---
 

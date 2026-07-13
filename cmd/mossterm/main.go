@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/mossterm/mossterm/internal/app"
 	"github.com/mossterm/mossterm/internal/config"
 	"github.com/mossterm/mossterm/internal/connect"
+	"github.com/mossterm/mossterm/internal/knownhosts"
 	"github.com/mossterm/mossterm/internal/secret"
 	"github.com/mossterm/mossterm/internal/session"
 	"github.com/mossterm/mossterm/internal/sshclient"
@@ -97,7 +99,8 @@ func buildLogger(level string) *slog.Logger {
 //	reg.Register("ssh", sshAdapter)                  //    注册 ssh factory
 //	mm  := session.NewMemoryManager().
 //	    WithConnectors(reg).
-//	    WithSecrets(sec)                              // 5. session (publickey 用)
+//	    WithSecrets(sec).
+//	    WithKnownHosts(kh)                            // 5. session (publickey + host key)
 //	app.New(app.Deps{...}) → *app.App                // 6. 装配 app
 //	wailsbindings.New(app) → *wailsbindings.App      // 7. 绑定层
 //	wails.Run(&options.App{Bind: []any{api}, ...})   // 8. 启动
@@ -120,6 +123,17 @@ func run(flags *cliFlags, logger *slog.Logger) error {
 	}
 	logger.Info("secret store ready")
 
+	// 2.5 known_hosts：host key 持久化（v0.1.3+）
+	//
+	// 放在 config.toml 同目录下（默认 ~/.config/mossterm/known_hosts），
+	// 与 OpenSSH 不共用，便于隔离与排查。
+	knownHostsPath := filepath.Join(filepath.Dir(cfg.Path()), "known_hosts")
+	kh, err := knownhosts.New(knownHostsPath)
+	if err != nil {
+		return fmt.Errorf("init known_hosts at %s: %w", knownHostsPath, err)
+	}
+	logger.Info("known_hosts ready", "path", knownHostsPath, "entries", kh.Size())
+
 	// 3. 跳板策略 registry
 	//
 	// v0.1：空注册表。session.Manager 在 v0.1 走 connect.Connector
@@ -141,10 +155,11 @@ func run(flags *cliFlags, logger *slog.Logger) error {
 	}
 	logger.Info("connector registry ready", "schemes", reg.Schemes())
 
-	// 5. 会话 manager（带 connectors + secrets 注入）
+	// 5. 会话 manager（带 connectors + secrets + known_hosts 注入）
 	mm := session.NewMemoryManager().
 		WithConnectors(reg).
-		WithSecrets(sec)
+		WithSecrets(sec).
+		WithKnownHosts(kh)
 
 	// 6. 装配 app
 	core := app.New(app.Deps{

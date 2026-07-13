@@ -5,6 +5,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/mossterm/mossterm/internal/knownhosts"
 	"github.com/mossterm/mossterm/internal/secret"
 )
 
@@ -15,6 +16,9 @@ import (
 type Deps struct {
 	// HostKeyCb 会在 SSH 协议握手阶段被回调，用于实现 known_hosts 校验。
 	// 当前仅 sshclient 关心；其它协议可置 nil。
+	//
+	// v0.1.3 起：填入 knownhosts.Manager.HostKeyCallback() 的返回值。
+	// 留空时回退到 InsecureIgnoreHostKey（v0.1.1 行为）。
 	HostKeyCb HostKeyCallback
 	// BannerCb 用于接收 SSH banner（连接前由服务端推送的提示信息）。
 	BannerCb BannerCallback
@@ -24,6 +28,11 @@ type Deps struct {
 	// Secrets 用于解析 publickey 认证时从 secret.Store 拉取私钥。
 	// nil 时 publickey 认证会返回 error（提示用户先初始化凭据存储）。
 	Secrets secret.Store
+	// KnownHosts 用于 host key 校验；与 HostKeyCb 二选一（同时存在时 HostKeyCb 优先）。
+	//
+	// v0.1.3 起：sshclient 会自动用 KnownHosts.HostKeyCallback() 覆盖 HostKeyCb。
+	// 未来可能完全合并（去掉 HostKeyCb 字段）。
+	KnownHosts *knownhosts.Manager
 }
 
 // HostKeyCallback 兼容 golang.org/x/crypto/ssh.HostKeyCallback 签名。

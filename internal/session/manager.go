@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/mossterm/mossterm/internal/connect"
+	"github.com/mossterm/mossterm/internal/knownhosts"
 	"github.com/mossterm/mossterm/internal/secret"
 )
 
@@ -50,6 +51,10 @@ type MemoryManager struct {
 	// secrets 是凭据存储，用于 publickey auth 时从 secret.Store 拉私钥。
 	// nil 时 publickey 路径会返回明确错误（提示用户未初始化凭据存储）。
 	secrets secret.Store
+
+	// knownHosts 是 known_hosts 文件管理器（v0.1.3+）。
+	// nil 时回退到 InsecureIgnoreHostKey（v0.1 行为，⚠️ MITM 风险）。
+	knownHosts *knownhosts.Manager
 }
 
 // NewMemoryManager 构造一个空的 Manager，自带一个空 connect.Registry。
@@ -97,6 +102,25 @@ func (m *MemoryManager) WithSecrets(s secret.Store) *MemoryManager {
 	return m
 }
 
+// WithKnownHosts 注入一个 knownhosts.Manager（用于 host key 校验）。
+//
+// 链式调用：
+//
+//	mm := session.NewMemoryManager().
+//	    WithConnectors(reg).
+//	    WithKnownHosts(kh)
+//
+// kh 为 nil 时 sshclient 兜底为 InsecureIgnoreHostKey（保持向后兼容）。
+func (m *MemoryManager) WithKnownHosts(kh *knownhosts.Manager) *MemoryManager {
+	if kh == nil {
+		return m
+	}
+	m.mu.Lock()
+	m.knownHosts = kh
+	m.mu.Unlock()
+	return m
+}
+
 // Open 实现 Manager.Open。
 //
 // 流程：
@@ -131,6 +155,7 @@ func (m *MemoryManager) Open(ctx context.Context, req OpenRequest) (Session, err
 	m.mu.RLock()
 	registry := m.connectors
 	secrets := m.secrets
+	knownHosts := m.knownHosts
 	m.mu.RUnlock()
 	if registry == nil {
 		return nil, errors.New("session.MemoryManager.Open: connector registry is nil")
@@ -140,7 +165,8 @@ func (m *MemoryManager) Open(ctx context.Context, req OpenRequest) (Session, err
 		return nil, errors.New("session.MemoryManager.Open: no factory registered for scheme \"ssh\"")
 	}
 	deps := connect.StdDeps()
-	deps.Secrets = secrets // 注入凭据存储（publickey 用）
+	deps.Secrets = secrets      // 注入凭据存储（publickey 用）
+	deps.KnownHosts = knownHosts // 注入 known_hosts（host key 校验）
 	connector, err := factory(deps)
 	if err != nil {
 		return nil, fmt.Errorf("session.MemoryManager.Open: build ssh connector: %w", err)
