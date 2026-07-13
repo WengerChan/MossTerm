@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2"
@@ -31,6 +33,9 @@ import (
 //   - knownHosts：known_hosts 文件管理器（v0.1.3+）。
 //   - signerCache：缓存按 KeyID→Signer 解析过的 ssh.Signer，
 //     避免每次连接都重新打开 secret store。
+//   - done / closeOnce：keepalive 协程退出信号（v0.1.4+）。
+//     Connector 是 long-lived singleton；Close 一次性 close(done) 让所有
+//     在飞的 keepalive 协程退出。closeOnce 保证 Close 幂等。
 type Connector struct {
 	hostKeyCb   connect.HostKeyCallback
 	bannerCb    connect.BannerCallback
@@ -39,6 +44,8 @@ type Connector struct {
 	secrets     secret.Store
 	knownHosts  *knownhosts.Manager
 	signerCache *lru.Cache[string, ssh.Signer]
+	done        chan struct{}
+	closeOnce   sync.Once
 }
 
 // New 构造一个 SSH Connector。
@@ -74,6 +81,10 @@ func New(d connect.Deps) (*Connector, error) {
 		hostKeyCb = ssh.InsecureIgnoreHostKey()
 	}
 
+	if keepAlive > 0 {
+		slog.Info("ssh keepalive enabled", "interval", keepAlive)
+	}
+
 	return &Connector{
 		hostKeyCb:   hostKeyCb,
 		bannerCb:    d.BannerCb,
@@ -82,6 +93,7 @@ func New(d connect.Deps) (*Connector, error) {
 		secrets:     d.Secrets,
 		knownHosts:  d.KnownHosts,
 		signerCache: cache,
+		done:        make(chan struct{}),
 	}, nil
 }
 
@@ -165,11 +177,14 @@ func (c *Connector) Dial(ctx context.Context, params connect.DialParams) (net.Co
 	}
 	client := ssh.NewClient(clientConn, chans, reqs)
 
-	// 阶段 3（可选）：启动 keepalive。
-	// 注释掉以减少 v0.1 噪音；要开启去掉注释即可。
-	// if c.keepAlive > 0 {
-	//     go c.runKeepAlive(client, c.keepAlive)
-	// }
+	// 阶段 3：启动 keepalive（v0.1.4+）。
+	//
+	// 目的：消除长 idle 时被中间设备单方面断开的风险。
+	// 退出：c.done 被 close 时（Connector.Close）或 SendRequest 失败时。
+	// 注意：keepAlive 在 New 阶段被兜底为 30s，正常 main.go 路径下恒 > 0。
+	if c.keepAlive > 0 {
+		go c.runKeepAlive(client, c.keepAlive)
+	}
 
 	return &sshConn{Conn: rawConn, client: client}, nil
 }
@@ -327,6 +342,32 @@ func loadSignerFromBytes(keyBytes []byte, passphrase string) (ssh.Signer, error)
 
 // 编译期断言：*Connector 满足 connect.Connector 接口。
 var _ connect.Connector = (*Connector)(nil)
+
+// Close 关闭 Connector，停止所有正在运行的 keepalive 协程。
+//
+// 设计：Connector 是协议工厂对象，本身不持有网络资源；它唯一的副作用
+// 是在 Dial 阶段启动 keepalive 协程。因此 Close 只做一件事：
+// close(c.done)，让所有 keepalive 协程在下一次 select 命中 done 分支时退出。
+//
+// 幂等：通过 sync.Once 保证；多次调用安全。
+//
+// 注意：
+//   - 调用 Close 后 *不应* 再调用 Dial —— 新启动的 keepalive 协程会因为
+//     done 已 closed 而立即退出。Connector 语义上是"跟随进程退出的 long-lived
+//     singleton"，本项目 main.go（v0.1.4）暂不调用 Close，Connector 跟随
+//     进程退出；v0.2 接入 graceful shutdown 时 main.go 应在退出前调用 Close。
+//   - 该方法是 *Connector* 上的新方法，不在 connect.Connector 接口里（接口
+//     契约见 docs/ARCHITECTURE.md §6.1）。session.Manager 不直接持有
+//     *Connector，而是 connect.Connector 接口，所以这个方法在 Manager 视角
+//     不可见 —— 这是有意的：keepalive 资源由 sshclient 自治。
+func (c *Connector) Close() {
+	if c.done == nil {
+		return
+	}
+	c.closeOnce.Do(func() {
+		close(c.done)
+	})
+}
 
 // -----------------------------------------------------------------------------
 // 内部类型

@@ -73,6 +73,28 @@
 - ⚠️ `Manager.Open` 同步执行 dial，订阅者看不到 `Connecting` / `Authenticating` 中间状态
 - ⚠️ SFTP 客户端未实现（推到 v0.5）
 
+## [v0.1.4] - 2026-07-13
+
+### Added
+- `internal/sshclient/keepalive.go` — `runKeepAlive` 协程 + 3s 超时
+- `internal/sshclient/keepalive_test.go` — 3 个单元测试
+- `(*Connector).Close()` — 关闭 keepalive 协程，`sync.Once` 保护幂等
+
+### Changed
+- `Dial` 启用 keepalive 协程（之前被注释）
+- `Connector` 新增 `done chan struct{}` + `closeOnce sync.Once` 字段
+- `New` 初始化 `done` 通道 + 启用时打 INFO 日志
+
+### Security
+- 长 idle 连接不再被中间设备单方面断开
+- 网络断连通过 keepalive 失败在 3s 内感知
+
+### Known Limitations
+- ⚠️ SendRequest 超时靠 goroutine + Timer，timeout 触发时启动 goroutine 短暂泄漏（v0.33+ 升级到 ctx 版可彻底解决）
+- ⚠️ 单元测试未覆盖 SendRequest 失败路径（要起真实 ssh.Server，留给 v0.2）
+
+详细 dev-log：[`docs/dev-log/v0.1.4-2026-07-13.md`](./docs/dev-log/v0.1.4-2026-07-13.md)
+
 ## [v0.1.3] - 2026-07-13
 
 ### Added
