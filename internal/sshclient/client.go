@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/mossterm/mossterm/internal/connect"
+	"github.com/mossterm/mossterm/internal/secret"
 )
 
 // Connector 是 connect.Connector 的 SSH 实现。
@@ -25,6 +26,7 @@ import (
 //   - hostKeyCb：host key 校验回调（known_hosts 校验逻辑由 callback 实现）。
 //   - bannerCb：服务端 banner 回调。
 //   - keepAlive / dialTimeout：默认心跳与拨号超时，可在 DialParams 中覆盖。
+//   - secrets：凭据存储，用于解析 publickey auth 时的私钥。
 //   - signerCache：缓存按 KeyID→Signer 解析过的 ssh.Signer，
 //     避免每次连接都重新打开 secret store。
 type Connector struct {
@@ -32,6 +34,7 @@ type Connector struct {
 	bannerCb    connect.BannerCallback
 	keepAlive   time.Duration
 	dialTimeout time.Duration
+	secrets     secret.Store
 	signerCache *lru.Cache[string, ssh.Signer]
 }
 
@@ -39,6 +42,8 @@ type Connector struct {
 //
 // deps.HostKeyCb 为 nil 时使用 InsecureIgnoreHostKey 作为兜底（仅 v0.1）。
 // TODO(security): 接入 known_hosts 持久化与"首次信任"对话框。
+//
+// deps.Secrets 用于 publickey 认证：nil 时 publickey 路径会返回明确错误。
 func New(d connect.Deps) (*Connector, error) {
 	keepAlive := d.KeepAlive
 	if keepAlive == 0 {
@@ -57,6 +62,7 @@ func New(d connect.Deps) (*Connector, error) {
 		bannerCb:    d.BannerCb,
 		keepAlive:   keepAlive,
 		dialTimeout: dialTimeout,
+		secrets:     d.Secrets,
 		signerCache: cache,
 	}, nil
 }
@@ -93,7 +99,7 @@ func (c *Connector) Dial(ctx context.Context, params connect.DialParams) (net.Co
 		timeout = c.dialTimeout
 	}
 
-	methods, err := authMethods(params.Auth)
+	methods, err := c.authMethods(params.Auth)
 	if err != nil {
 		return nil, fmt.Errorf("sshclient.Dial: auth: %w", err)
 	}
@@ -257,23 +263,42 @@ func (c *Connector) OpenSession(ctx context.Context, conn net.Conn, opts connect
 
 // loadSigner 从 secret store 解析 ssh.Signer 并写入缓存。
 //
-// v0.1 stub：secret.Store 尚未实现，因此这里总是返回 error 并提示 TODO。
-// 未来接通后大致流程：
-//  1. secret.Store.Get(secret.ID(keyID)) 拿到私钥 bytes
-//  2. 调用 loadSignerFromBytes(bytes, passphrase) 解析
-//  3. 解析结果写入 signerCache（按 keyID 索引）
-func (c *Connector) loadSigner(keyID string) (ssh.Signer, error) {
+// 真实实现（v0.1.2）：
+//  1. 读 signerCache 缓存；命中直接返回
+//  2. secret.Store.Get(secret.ID(keyID)) 拿私钥 bytes
+//  3. loadSignerFromBytes(bytes, passphrase) 解析
+//  4. 解析结果写入 signerCache（按 keyID 索引）
+//  5. 返回解析后的 ssh.Signer
+//
+// c.secrets 为 nil 时返回明确错误（提示用户未初始化凭据存储）。
+func (c *Connector) loadSigner(keyID, passphrase string) (ssh.Signer, error) {
 	if keyID == "" {
 		return nil, errors.New("sshclient.loadSigner: empty keyID")
 	}
-	// 读缓存
+	// 1. 缓存命中
 	if s, ok := c.signerCache.Get(keyID); ok {
 		return s, nil
 	}
-	// TODO(secret): secret.Store.Get(secret.ID(keyID))
-	// 这里我们故意不引入对 secret 包的具体实现类型的依赖，避免循环。
-	// 调用方应自行从 secret.Store 拉 bytes 后调 loadSignerFromBytes。
-	return nil, fmt.Errorf("sshclient.loadSigner: not yet implemented (keyID=%q; pending secret.Store)", keyID)
+	// 2. secret.Store 必需
+	if c.secrets == nil {
+		return nil, errors.New("sshclient.loadSigner: secret.Store not initialized (deps.Secrets is nil)")
+	}
+	// 3. 从 secret.Store 拉私钥 bytes
+	keyBytes, err := c.secrets.Get(secret.ID(keyID))
+	if err != nil {
+		return nil, fmt.Errorf("sshclient.loadSigner: secrets.Get(%q): %w", keyID, err)
+	}
+	if len(keyBytes) == 0 {
+		return nil, fmt.Errorf("sshclient.loadSigner: empty key bytes for keyID=%q", keyID)
+	}
+	// 4. 解析
+	signer, err := loadSignerFromBytes(keyBytes, passphrase)
+	if err != nil {
+		return nil, fmt.Errorf("sshclient.loadSigner: parse keyID=%q: %w", keyID, err)
+	}
+	// 5. 写缓存
+	c.signerCache.Add(keyID, signer)
+	return signer, nil
 }
 
 // loadSignerFromBytes 从 PEM 编码的 OpenSSH 私钥字节解析出 ssh.Signer。

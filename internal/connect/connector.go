@@ -84,10 +84,15 @@ type PasswordAuth string
 
 // PublicKeyAuth 表示公私钥登录。
 //
-// Signer 必须由 internal/secret 或 internal/agent 提供。
-// Passphrase 为空表示私钥未加密。
+// 三种使用方式：
+//  1. Signer != nil：调用方已解析好 ssh.Signer（最直接，sshclient 不会再去拉私钥）
+//  2. KeyID != ""：sshclient 从 secret.Store 拉私钥 bytes 并解析
+//  3. Signer == nil && KeyID == ""：构造不完整，sshclient 报错
+//
+// Passphrase 为空表示私钥未加密；非空则用其解密。
 type PublicKeyAuth struct {
 	Signer     ssh.Signer
+	KeyID      string
 	Passphrase string
 }
 

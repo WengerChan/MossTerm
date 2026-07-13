@@ -4,6 +4,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/mossterm/mossterm/internal/secret"
 )
 
 // Deps 是构造 Connector 所需的依赖集合。
@@ -19,6 +21,9 @@ type Deps struct {
 	// DialTimeout 与 KeepAlive 是默认值；调用方可在 DialParams 中覆盖。
 	DialTimeout time.Duration
 	KeepAlive   time.Duration
+	// Secrets 用于解析 publickey 认证时从 secret.Store 拉取私钥。
+	// nil 时 publickey 认证会返回 error（提示用户先初始化凭据存储）。
+	Secrets secret.Store
 }
 
 // HostKeyCallback 兼容 golang.org/x/crypto/ssh.HostKeyCallback 签名。

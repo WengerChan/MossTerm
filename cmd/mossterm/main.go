@@ -95,7 +95,9 @@ func buildLogger(level string) *slog.Logger {
 //	ag  := agent.NewMemoryRegistry()                 // 3. 跳板 registry
 //	reg := connect.NewMemoryRegistry()               // 4. 协议 registry
 //	reg.Register("ssh", sshAdapter)                  //    注册 ssh factory
-//	mm  := session.NewMemoryManager().WithConnectors(reg) // 5. session
+//	mm  := session.NewMemoryManager().
+//	    WithConnectors(reg).
+//	    WithSecrets(sec)                              // 5. session (publickey 用)
 //	app.New(app.Deps{...}) → *app.App                // 6. 装配 app
 //	wailsbindings.New(app) → *wailsbindings.App      // 7. 绑定层
 //	wails.Run(&options.App{Bind: []any{api}, ...})   // 8. 启动
@@ -139,8 +141,10 @@ func run(flags *cliFlags, logger *slog.Logger) error {
 	}
 	logger.Info("connector registry ready", "schemes", reg.Schemes())
 
-	// 5. 会话 manager（带 connectors 注入）
-	mm := session.NewMemoryManager().WithConnectors(reg)
+	// 5. 会话 manager（带 connectors + secrets 注入）
+	mm := session.NewMemoryManager().
+		WithConnectors(reg).
+		WithSecrets(sec)
 
 	// 6. 装配 app
 	core := app.New(app.Deps{

@@ -67,27 +67,34 @@
 - `session.MemoryManager` 加 `WithConnectors` 注入器
 
 ### Known Limitations
-- ⚠️ publickey auth 未通（待 `secret.Store.Get` 接通 `loadSigner`）
 - ⚠️ Host key 校验默认放行（`ssh.InsecureIgnoreHostKey`，v0.2 接入 known_hosts）
 - ⚠️ Keepalive 注释掉了（v0.2 启用）
 - ⚠️ events 通道满会丢事件（`session:overflow` 事件类型已定义，v0.2 实现）
 - ⚠️ `Manager.Open` 同步执行 dial，订阅者看不到 `Connecting` / `Authenticating` 中间状态
 - ⚠️ SFTP 客户端未实现（推到 v0.5）
 
+## [v0.1.2] - 2026-07-13
+
+### Added
+- `connect.Deps.Secrets` 字段，注入 secret.Store 到 sshclient
+- `connect.PublicKeyAuth.KeyID` 字段，支持"未解析 + 延迟加载"模式
+- `sshclient.Connector.loadSigner(keyID, passphrase)` 真实实现：缓存 → secret.Get → loadSignerFromBytes → 写缓存
+- `session.MemoryManager.WithSecrets(sec)` 注入器
+- `cmd/mossterm/main.go` 调用 `WithSecrets(sec)` 把凭据存储接入 session manager
+
 ### Changed
-- （暂无）
-
-### Deprecated
-- （暂无）
-
-### Removed
-- （暂无）
+- `authMethods` 从 free function 改为 `*Connector` 方法，能用 `c.loadSigner`
+- `connect.AuthMethodFromSpec` publickey 路径返回 `PublicKeyAuth{KeyID, Passphrase}`（不再返回 "not yet wired" 错误）
+- `session.MemoryManager.Open` 构造 `connect.Deps` 时填 `Secrets: m.secrets`
 
 ### Fixed
-- （暂无）
+- publickey auth 端到端通路打通：Profile.Kind="publickey" + KeyID 即可登录
 
 ### Security
-- （暂无）
+- publickey 私钥在内存中只存已解析的 `ssh.Signer`，不存明文
+- `signerCache` 是 per-connector LRU（cap 64），不是全局共享
+
+详细 dev-log：[`docs/dev-log/v0.1.2-2026-07-13.md`](./docs/dev-log/v0.1.2-2026-07-13.md)
 
 ---
 

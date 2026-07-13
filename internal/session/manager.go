@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/mossterm/mossterm/internal/connect"
+	"github.com/mossterm/mossterm/internal/secret"
 )
 
 // Manager 维护所有活跃 Session 的注册表与生命周期。
@@ -45,6 +46,10 @@ type MemoryManager struct {
 	// app/wire.go 会在启动时把 sshclient.Factory 注册进去。
 	// 用户也可以通过 WithConnectors 注入自己的 registry。
 	connectors connect.Registry
+
+	// secrets 是凭据存储，用于 publickey auth 时从 secret.Store 拉私钥。
+	// nil 时 publickey 路径会返回明确错误（提示用户未初始化凭据存储）。
+	secrets secret.Store
 }
 
 // NewMemoryManager 构造一个空的 Manager，自带一个空 connect.Registry。
@@ -69,6 +74,25 @@ func (m *MemoryManager) WithConnectors(r connect.Registry) *MemoryManager {
 	}
 	m.mu.Lock()
 	m.connectors = r
+	m.mu.Unlock()
+	return m
+}
+
+// WithSecrets 注入一个 secret.Store（用于 publickey auth 时拉私钥）。
+//
+// 链式调用：
+//
+//	mm := session.NewMemoryManager().
+//	    WithConnectors(reg).
+//	    WithSecrets(sec)
+//
+// secrets 为 nil 时 publickey 路径会返回错误（保持向后兼容）。
+func (m *MemoryManager) WithSecrets(s secret.Store) *MemoryManager {
+	if s == nil {
+		return m
+	}
+	m.mu.Lock()
+	m.secrets = s
 	m.mu.Unlock()
 	return m
 }
@@ -106,6 +130,7 @@ func (m *MemoryManager) Open(ctx context.Context, req OpenRequest) (Session, err
 	// 4. 解析 connector
 	m.mu.RLock()
 	registry := m.connectors
+	secrets := m.secrets
 	m.mu.RUnlock()
 	if registry == nil {
 		return nil, errors.New("session.MemoryManager.Open: connector registry is nil")
@@ -114,7 +139,9 @@ func (m *MemoryManager) Open(ctx context.Context, req OpenRequest) (Session, err
 	if !ok {
 		return nil, errors.New("session.MemoryManager.Open: no factory registered for scheme \"ssh\"")
 	}
-	connector, err := factory(connect.StdDeps())
+	deps := connect.StdDeps()
+	deps.Secrets = secrets // 注入凭据存储（publickey 用）
+	connector, err := factory(deps)
 	if err != nil {
 		return nil, fmt.Errorf("session.MemoryManager.Open: build ssh connector: %w", err)
 	}

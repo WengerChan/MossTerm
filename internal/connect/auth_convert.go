@@ -32,16 +32,19 @@ const (
 //
 // kind 必须是 AuthKind* 之一；其他取值返回 error。
 //
-// 重要：v0.1 仅支持 password；其他类型返回 ErrAuthNotImplemented。
-// 这与"默认禁用密码"的 settings 看似矛盾 —— 但 sshclient 在 New
-// 阶段会再校验 settings.AllowPassword 并拒绝非密码尝试；本函数只做
-// 形态转换，权限校验在更上层完成。
-//
 // 参数说明：
 //   - kind: 业务层识别的 auth 方式字符串
 //   - password: 明文密码（仅 password 时使用）
-//   - keyID: 私钥在 secret.Store 中的 ID（仅 publickey 时使用，v0.1 暂未接通）
+//   - keyID: 私钥在 secret.Store 中的 ID（仅 publickey 时使用）
 //   - passphrase: 私钥 passphrase（仅 publickey 时使用，可选）
+//
+// v0.1.2 起 publickey 真实接通：
+//   1. publickey 路径返回 PublicKeyAuth{KeyID, Passphrase}，Signer 留空
+//   2. sshclient 收到这个 AuthMethod 后用 connector.secrets 拉私钥 bytes
+//   3. 解析为 ssh.Signer 后用于 ssh.PublicKeys
+//
+// 该分工让 connect 包保持"协议无关 + 不依赖具体实现"，secret 拉取和
+// PEM 解析在 sshclient 内部完成。
 func AuthMethodFromSpec(kind AuthKind, password, keyID, passphrase string) (AuthMethod, error) {
 	switch kind {
 	case AuthKindPassword:
@@ -51,17 +54,12 @@ func AuthMethodFromSpec(kind AuthKind, password, keyID, passphrase string) (Auth
 		return PasswordAuth(password), nil
 
 	case AuthKindPublicKey:
-		// v0.1 不接 secret.Store —— 让 caller 决定怎么处理。
-		// 真实实现路径：
-		//   1. secret.Store.Get(secret.ID(keyID)) -> bytes
-		//   2. sshclient.loadSignerFromBytes(bytes, passphrase) -> ssh.Signer
-		//   3. return PublicKeyAuth{Signer: signer, Passphrase: passphrase}, nil
 		if keyID == "" {
 			return nil, errors.New("connect.AuthMethodFromSpec: publickey: empty keyID")
 		}
-		// v0.1 直接返回一个"未就绪"的错误，避免调用方在没接通 secret
-		// 之前误以为能登录。
-		return nil, fmt.Errorf("connect.AuthMethodFromSpec: publickey via secret.Store not yet wired (keyID=%q)", keyID)
+		// 把 KeyID 透传给 sshclient，让它在拿到 connector.secrets 后拉私钥
+		// 解析。如果 connector.secrets == nil，sshclient 会返回明确错误。
+		return PublicKeyAuth{KeyID: keyID, Passphrase: passphrase}, nil
 
 	case AuthKindAgent:
 		return AgentAuth{}, nil

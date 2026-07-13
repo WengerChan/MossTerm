@@ -2,7 +2,7 @@
 //
 // 每种 connect.AuthMethod 对应一个 / 多个 ssh.AuthMethod 实现：
 //   - PasswordAuth            → ssh.Password
-//   - PublicKeyAuth           → ssh.PublicKeys (使用外部注入的 Signer)
+//   - PublicKeyAuth           → ssh.PublicKeys (使用外部注入的 Signer，或从 secret.Store 拉 KeyID)
 //   - AgentAuth               → ssh.PublicKeysCallback (走本地 ssh-agent)
 //   - KeyboardInteractiveAuth → ssh.KeyboardInteractive (v0.1 仅占位)
 package sshclient
@@ -21,10 +21,13 @@ import (
 
 // authMethods 把 connect.AuthMethod 转换为 ssh 库所需的 []ssh.AuthMethod。
 //
-// 该函数不持有任何状态：每次调用都会重新解析（agent 情况除外 —— agent
-// 每次回调都会重新连接 $SSH_AUTH_SOCK）。这对 v0.1 已经足够；未来
-// 可以在 Connector 层做 Signer 缓存。
-func authMethods(am connect.AuthMethod) ([]ssh.AuthMethod, error) {
+// 作为 Connector 的方法，publickey 路径可以在需要时通过 c.loadSigner
+// 从 secret.Store 拉私钥解析 signer。
+//
+// 该方法不持有网络/IO 状态：每次调用都会重新解析（agent 情况除外 ——
+// agent 每次回调都会重新连接 $SSH_AUTH_SOCK）。signerCache 提供 per-KeyID
+// 缓存，避免重复解析。
+func (c *Connector) authMethods(am connect.AuthMethod) ([]ssh.AuthMethod, error) {
 	if am == nil {
 		return nil, errors.New("sshclient.authMethods: nil auth method")
 	}
@@ -33,10 +36,21 @@ func authMethods(am connect.AuthMethod) ([]ssh.AuthMethod, error) {
 		return []ssh.AuthMethod{ssh.Password(string(a))}, nil
 
 	case connect.PublicKeyAuth:
-		if a.Signer == nil {
-			return nil, errors.New("sshclient.authMethods: PublicKeyAuth.Signer is nil")
+		// 两种使用方式：
+		//   1. Signer != nil —— 调用方已解析好，直接用
+		//   2. KeyID != "" —— 从 secret.Store 拉私钥后解析
+		signer := a.Signer
+		if signer == nil {
+			if a.KeyID == "" {
+				return nil, errors.New("sshclient.authMethods: PublicKeyAuth: both Signer and KeyID are empty")
+			}
+			loaded, err := c.loadSigner(a.KeyID, a.Passphrase)
+			if err != nil {
+				return nil, fmt.Errorf("sshclient.authMethods: load signer for keyID=%q: %w", a.KeyID, err)
+			}
+			signer = loaded
 		}
-		methods := []ssh.AuthMethod{ssh.PublicKeys(a.Signer)}
+		methods := []ssh.AuthMethod{ssh.PublicKeys(signer)}
 		// 如果带 passphrase，可补充 keyboard-interactive 作为兜底
 		// (某些服务器在公钥失败时会回退询问口令)
 		if a.Passphrase != "" {
