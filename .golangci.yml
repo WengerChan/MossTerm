@@ -1,0 +1,137 @@
+# MossTerm golangci-lint 配置
+# 文档: https://golangci-lint.run/usage/configuration/
+
+run:
+  # 超时（CI 上可适当放宽）
+  timeout: 5m
+  # 默认 ./...
+  tests: true
+  # 构建标签
+  build-tags:
+    - integration
+  # 允许并发（默认等于 CPU 数）
+  allow-parallel-runners: true
+  # 是否允许已修改文件 + 它们的依赖之外的 linter 失败
+  modules-download-mode: readonly
+
+output:
+  formats:
+    - format: colored-line-number
+      path: stdout
+  print-issued-lines: true
+  print-linter-name: true
+  uniq-by-line: true
+
+linters:
+  disable-all: true
+  enable:
+    # —— 基础 ——
+    - errcheck      # 检查未处理的 error
+    - gosimple      # 简化代码
+    - govet         # 官方 go vet
+    - ineffassign   # 检测无效赋值
+    - staticcheck   # 静态分析（集大成者）
+    - unused        # 未使用的标识符
+
+    # —— 风格 ——
+    - gofmt         # 格式
+    - goimports     # import 分组与排序
+    - misspell      # 英文拼写
+    - gocritic      # 代码味道
+    - revive        # golint 替代
+    - whitespace    # 多余空行/行尾空格
+
+    # —— 健壮性 ——
+    - bodyclose     # HTTP body 必须 Close
+    - contextcheck  # context 传递
+    - nilerr        # 返回 nil 又记 error
+    - nolintlint    # nolint 注释必须带原因
+    - prealloc      # slice 预分配
+    - predeclared   # 遮蔽内建标识符
+
+    # —— 性能 / 复杂度 ——
+    - gocyclo       # 圈复杂度
+    - goconst       # 重复字符串常量化
+    - dupl          # 重复代码块
+
+    # —— 安全（基础，深度检查交给 gosec） ——
+    - exportloopref # 循环变量捕获（Go 1.22+ 已不再需要，可注释）
+    - durationcheck # time.Duration 算术误用
+    - copyloopvar   # 循环变量复制（Go 1.22+）
+
+  # 预设（用 presets 时下面 enable 列表仍然生效）
+  presets:
+    - bugs
+    - performance
+    - style
+
+  # 快速反馈：先跑便宜的 linter
+  fast: false
+
+linters-settings:
+  gocyclo:
+    min-complexity: 15
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+    disabled-checks:
+      - dupImport # goimports 已处理
+      - ifElseChain
+      - tooManyParameters
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment # 性能无关、可读性差
+  revive:
+    rules:
+      - name: var-naming
+      - name: package-comments
+      - name: indent-error-flow
+      - name: errorf
+      - name: error-strings
+      - name: dot-imports
+      - name: blank-imports
+      - name: context-as-argument
+      - name: early-return
+      - name: unused-parameter
+        arguments:
+          - allowRegex: "^_"
+  misspell:
+    locale: US
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+  goimports:
+    local-prefixes: github.com/mossterm/mossterm
+  staticcheck:
+    checks:
+      - all
+      - -SA1019 # 允许使用 deprecated API（迁移期常见），按需开启
+  gosec:
+    excludes:
+      - G107 # URL 拼接警告过多，必要时单独处理
+
+issues:
+  # 同一行多个问题一起报
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  # 新代码零警告：CI 会在 PR 上跑
+  new-from-rev: origin/main
+  new: true
+  # 排除 vendor、自动生成、frontend
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - gocritic
+        - goconst
+        - dupl
+    - path: internal/secret/
+      text: "G101" # 误报：硬编码凭据检测（凭据来自 keyring）
+    - path: ^frontend/
+      linters:
+        - all
+  exclude-use-default: false
+  show-stats: true

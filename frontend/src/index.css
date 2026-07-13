@@ -1,0 +1,32 @@
+/**
+ * Tailwind 入口
+ * --------------------------------------------------------------------
+ * 只需要 @tailwind 三个指令 + 自定义层（components / utilities）。
+ * 全局重置与设计令牌见 src/styles/globals.css 与 theme.css。
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 自定义层：通用组件类 */
+@layer components {
+  .moss-btn {
+    @apply inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-sm
+           bg-moss-surface border border-moss-border text-ink
+           hover:bg-moss-hover hover:border-accent/40
+           focus:outline-none focus:ring-1 focus:ring-accent
+           transition-colors duration-100;
+  }
+  .moss-btn-primary {
+    @apply bg-accent/20 border-accent/60 text-accent
+           hover:bg-accent/30;
+  }
+  .moss-input {
+    @apply w-full rounded px-2 py-1 text-sm bg-moss-bg border border-moss-border
+           text-ink placeholder-ink-muted
+           focus:outline-none focus:border-accent/60 focus:ring-1 focus:ring-accent/40;
+  }
+  .moss-divider {
+    @apply border-moss-border;
+  }
+}

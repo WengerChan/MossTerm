@@ -1,0 +1,341 @@
+# =============================================================================
+# MossTerm 配置示例
+# -----------------------------------------------------------------------------
+# 复制为 config.toml 后按需修改：
+#   cp configs/config.example.toml configs/config.toml
+#
+# 查找规则（按优先级）：
+#   1. --config 命令行参数
+#   2. MOSSTERM_CONFIG 环境变量
+#   3. $XDG_CONFIG_HOME/mossterm/config.toml
+#   4. ~/Library/Application Support/mossterm/config.toml  (macOS)
+#   5. %APPDATA%\mossterm\config.toml                     (Windows)
+#   6. ./configs/config.toml                              (开发模式)
+#
+# 所有字段都是可选的；缺失字段会使用内置默认值。
+# 凭据（密码、passphrase）**不要**写在文件里，请走 OS Keyring。
+# =============================================================================
+
+# MossTerm 元信息（一般无需改）
+[meta]
+# 配置文件 schema 版本，用于迁移
+schema_version = 1
+# 配置所属 profile（多 profile 场景）
+profile        = "default"
+
+# -----------------------------------------------------------------------------
+# [general] —— 通用行为
+# -----------------------------------------------------------------------------
+[general]
+# 启动时自动连接上次会话（true / false）
+auto_reconnect        = true
+# 是否检查更新（v0.5+ 接入）
+check_update          = true
+# 主题：light | dark | auto（跟随系统）
+theme                 = "auto"
+# 语言：zh-CN | en-US | ja-JP | auto
+language              = "auto"
+# 单实例：再次启动时聚焦现有窗口（true / false）
+single_instance       = true
+# 退出时保存打开的 tab（true / false）
+restore_sessions      = true
+# 启动时是否显示快速连接面板
+show_quick_connect    = true
+
+# -----------------------------------------------------------------------------
+# [ui] —— 界面外观
+# -----------------------------------------------------------------------------
+[ui]
+# 字体（等宽）
+font_family           = "JetBrains Mono, Menlo, Consolas, monospace"
+# 字体大小（px）
+font_size             = 14
+# 行高倍数
+line_height           = 1.4
+# 边距（CSS 形式）
+padding               = "8px 12px"
+# 光标样式：block | underline | bar
+cursor_style          = "block"
+# 光标闪烁：blink | smooth | steady
+cursor_blink          = "smooth"
+# 选中即复制
+copy_on_select        = false
+# 右键粘贴
+right_click_paste     = true
+# 侧边栏位置：left | right | hidden
+sidebar_position      = "left"
+# 侧边栏宽度（px）
+sidebar_width         = 280
+# 状态栏显示
+status_bar            = true
+# 标签栏位置：top | bottom
+tab_bar_position      = "top"
+
+# -----------------------------------------------------------------------------
+# [terminal] —— 终端行为
+# -----------------------------------------------------------------------------
+[terminal]
+# 终端类型（传给 SSH 端）
+term_type             = "xterm-256color"
+# 滚动回滚行数
+scrollback            = 10000
+# 响铃：none | visual | beep | both
+bell                  = "visual"
+# 鼠标模式：none | click | drag | extend
+mouse_mode            = "drag"
+# 启用粗体字符（部分字体性能更差）
+bold_bright           = true
+# 启用斜体字符
+italic_allowed        = true
+# 是否裁剪长行（true 截断、false 换行）
+wrap_long_lines       = false
+# 性能：是否启用 WebGL 渲染（false 时回退 canvas）
+webgl_acceleration    = true
+# 渲染合并间隔（ms），用于 PTY 输出 batching
+render_coalesce_ms    = 8
+
+# -----------------------------------------------------------------------------
+# [ssh] —— SSH 默认行为
+# -----------------------------------------------------------------------------
+[ssh]
+# 用户名默认
+default_user          = ""
+# 默认端口
+default_port          = 22
+# Keepalive 间隔（秒），0 关闭
+keepalive_interval    = 30
+# 连接超时（秒）
+connect_timeout       = 15
+# 握手超时（秒）
+handshake_timeout     = 10
+# 认证超时（秒）
+auth_timeout          = 30
+# 默认认证方法（按顺序尝试）
+auth_methods          = ["publickey", "keyboard-interactive", "password"]
+# 是否使用 ssh-agent
+use_agent             = true
+# 严格主机密钥检查：ask | yes | no | accept-new
+strict_host_key       = "accept-new"
+# known_hosts 路径（留空走系统默认）
+known_hosts_path      = ""
+# 压缩：none | zlib | zlib@openssh.com
+compression           = "none"
+# X11 转发
+x11_forwarding        = false
+# agent 转发
+agent_forwarding      = false
+# 启用伪终端（大多数场景 true）
+request_pty           = true
+
+# -----------------------------------------------------------------------------
+# [sftp] —— SFTP 默认行为
+# -----------------------------------------------------------------------------
+[sftp]
+# 默认下载目录（相对 ~ 展开）
+download_dir          = "~/Downloads"
+# 块大小（KB）
+block_size            = 64
+# 并发传输数
+concurrency           = 4
+# 续传阈值（字节），小于此值不续传
+resume_threshold      = 1048576
+# 保留文件权限
+preserve_permissions  = true
+# 保留修改时间
+preserve_mtime        = true
+# 校验方式：none | md5 | sha256
+verify                = "sha256"
+# 显示隐藏文件
+show_hidden           = false
+# 默认排序：name | size | mtime | type
+sort_by               = "name"
+# 排序方向：asc | desc
+sort_desc             = false
+
+# -----------------------------------------------------------------------------
+# [transfer] —— 通用传输
+# -----------------------------------------------------------------------------
+[transfer]
+# 队列上限
+max_queue             = 100
+# 同时活跃任务数
+max_concurrent        = 4
+# 限速（KB/s，0 = 不限）
+speed_limit_kbps      = 0
+# 失败重试次数
+retry_count           = 3
+# 重试退避（毫秒）
+retry_backoff_ms      = 1000
+# 临时目录
+temp_dir              = ""
+
+# -----------------------------------------------------------------------------
+# [tunnel] —— 端口转发 / 跳板
+# -----------------------------------------------------------------------------
+[tunnel]
+# 跳板默认超时（秒）
+jump_timeout          = 10
+# 跳板链最大深度
+jump_max_depth        = 4
+# 默认本地绑定地址
+local_bind            = "127.0.0.1"
+# 默认远端绑定地址
+remote_bind           = "127.0.0.1"
+# 动态转发默认端口
+dynamic_port          = 1080
+# 持久化活跃的 tunnel（关闭应用时保持）
+keep_alive_on_exit    = false
+
+# -----------------------------------------------------------------------------
+# [agent] —— ssh-agent 集成
+# -----------------------------------------------------------------------------
+[agent]
+# 启用系统 agent
+enabled               = true
+# agent socket 路径（留空走 SSH_AUTH_SOCK）
+socket_path           = ""
+# 启动时加载的私钥（绝对路径）
+identities_only       = false
+# 私钥列表
+identities            = [
+    "~/.ssh/id_ed25519",
+    "~/.ssh/id_rsa",
+]
+
+# -----------------------------------------------------------------------------
+# [secret] —— 凭据存储
+# -----------------------------------------------------------------------------
+[secret]
+# 存储后端：keyring | file | memory
+#   keyring: macOS Keychain / Windows Credential Manager / Linux Secret Service
+#   file:    加密到 ~/.config/mossterm/secrets.enc（实验性）
+#   memory:  仅进程内，关闭即丢（最不推荐）
+backend               = "keyring"
+# 文件后端主口令来源：env | prompt | keyring
+#   env:    读 MOSSTERM_SECRET_PASSPHRASE
+#   prompt: 启动时弹窗
+#   keyring: 同样存到 keyring（bootstrapping 用）
+passphrase_source     = "keyring"
+# 内存缓存（毫秒），0 关闭
+memory_cache_ttl_ms   = 0
+
+# -----------------------------------------------------------------------------
+# [plugin] —— 插件宿主（WASM，v0.5+）
+# -----------------------------------------------------------------------------
+[plugin]
+# 启用插件
+enabled               = false
+# 插件目录
+plugin_dir            = "~/.local/share/mossterm/plugins"
+# 允许的网络：none | local | lan | any
+network_policy        = "none"
+# 允许的 FS 范围（glob）
+fs_allow              = ["~/Downloads/**"]
+# 内存上限（MB）
+memory_limit_mb       = 64
+# CPU 时间上限（毫秒 / 调用）
+cpu_quota_ms          = 100
+# 自动加载白名单
+auto_load             = []
+
+# -----------------------------------------------------------------------------
+# [ai] —— AI 辅助（v0.5+）
+# -----------------------------------------------------------------------------
+[ai]
+# 启用
+enabled               = false
+# 端点：openai | anthropic | ollama | custom
+provider              = "openai"
+# 端点 URL
+endpoint              = "https://api.openai.com/v1"
+# 模型
+model                 = "gpt-4o-mini"
+# API key 来源：env | keyring | config
+api_key_source        = "keyring"
+# 直接写在文件里的 API key（仅当 api_key_source = "config"，**慎用**）
+api_key               = ""
+# 上下文窗口（token）
+max_context_tokens    = 8000
+# 请求超时（秒）
+timeout               = 20
+# 是否在本地脱敏：发送前移除疑似敏感 token
+redact_locally        = true
+# 流式输出
+stream                = true
+# 功能开关
+features = { command_explain = true, error_diagnose = true, log_summary = true, snippet_gen = false }
+
+# -----------------------------------------------------------------------------
+# [telemetry] —— 遥测（默认全关）
+# -----------------------------------------------------------------------------
+[telemetry]
+# 启用遥测
+enabled               = false
+# 端点（v0.5+ 接入）
+endpoint              = "https://telemetry.mossterm.dev/v1"
+# 上报间隔（秒）
+interval_sec          = 3600
+# 包含哪些事件
+events = { app_start = true, app_exit = true, session_open = true, error = true, performance = false }
+
+# -----------------------------------------------------------------------------
+# [update] —— 自动更新（v0.5+）
+# -----------------------------------------------------------------------------
+[update]
+# 自动检查
+auto_check            = true
+# 自动下载
+auto_download         = false
+# channel：stable | beta | nightly
+channel               = "stable"
+# 镜像源（留空走默认）
+mirror                = ""
+
+# -----------------------------------------------------------------------------
+# [log] —— 日志
+# -----------------------------------------------------------------------------
+[log]
+# 级别：trace | debug | info | warn | error
+level                 = "info"
+# 输出：stderr | file | both
+output                = "both"
+# 文件路径
+file                  = ""
+# 单文件最大字节
+max_size_bytes        = 10485760
+# 保留文件数
+max_backups           = 5
+# 压缩归档
+compress              = true
+# 包含源码位置
+caller                = false
+
+# -----------------------------------------------------------------------------
+# [experimental] —— 实验性功能（不接受稳定保证）
+# -----------------------------------------------------------------------------
+[experimental]
+# 启用：函数 = true
+gpu_acceleration      = true
+multi_pane_split      = true
+ipc_pipe_socket       = false
+
+# -----------------------------------------------------------------------------
+# [keymap] —— 键位（v0.5+）
+# -----------------------------------------------------------------------------
+[keymap]
+preset                = "default"
+# 自定义映射示例（未实现前请留空）
+custom                = []
+
+# -----------------------------------------------------------------------------
+# [profiles.<name>] —— 多 profile（可选）
+# -----------------------------------------------------------------------------
+# [profiles.work]
+# inherits = "default"
+# [profiles.work.ssh]
+# default_user = "ops"
+#
+# [profiles.personal]
+# inherits = "default"
+# [profiles.personal.ui]
+# theme = "dark"

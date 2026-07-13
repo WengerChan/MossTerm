@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MossTerm · 架构总览</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-0: #0f1218;
+    --bg-1: #151921;
+    --bg-2: #1c2230;
+    --bg-3: #232a3a;
+    --line: #2a3245;
+    --line-soft: #1f2735;
+    --text: #e4e6eb;
+    --text-mute: #8b94a7;
+    --text-dim: #5d6677;
+    --moss: #7CB342;
+    --moss-dim: #5a8a2f;
+    --moss-soft: rgba(124, 179, 66, 0.12);
+    --amber: #e6a23c;
+    --rose: #e57373;
+    --indigo: #7986cb;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg-0);
+    color: var(--text);
+    line-height: 1.55;
+    font-size: 14.5px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace; }
+  .container { max-width: 1180px; margin: 0 auto; padding: 64px 32px; }
+
+  /* HERO */
+  .hero {
+    text-align: left;
+    padding: 80px 0 64px;
+    border-bottom: 1px solid var(--line-soft);
+    margin-bottom: 64px;
+  }
+  .hero-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px;
+    background: var(--moss-soft);
+    border: 1px solid rgba(124, 179, 66, 0.3);
+    border-radius: 999px;
+    color: var(--moss);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11.5px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    margin-bottom: 24px;
+  }
+  .hero h1 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 56px;
+    font-weight: 700;
+    margin: 0 0 8px;
+    letter-spacing: -0.02em;
+    background: linear-gradient(180deg, #ffffff 0%, #b0b6c2 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .hero h1 .accent { color: var(--moss); -webkit-background-clip: initial; background-clip: initial; }
+  .hero .tagline {
+    font-size: 18px;
+    color: var(--text-mute);
+    margin: 16px 0 32px;
+    max-width: 720px;
+  }
+  .hero-meta {
+    display: flex;
+    gap: 32px;
+    flex-wrap: wrap;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+  }
+  .hero-meta .item { display: flex; flex-direction: column; gap: 2px; }
+  .hero-meta .label { color: var(--text-dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; }
+  .hero-meta .value { color: var(--text); }
+  .hero-meta .value.moss { color: var(--moss); }
+
+  /* SECTION */
+  section { margin-bottom: 88px; }
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin-bottom: 32px;
+  }
+  .section-head .num {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--moss);
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .section-head h2 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 26px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  .section-head .sub {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-left: auto;
+  }
+
+  /* ARCHITECTURE DIAGRAM */
+  .arch {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 32px;
+    overflow-x: auto;
+  }
+  .arch-layer {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 16px;
+    align-items: stretch;
+    margin-bottom: 12px;
+  }
+  .arch-layer:last-child { margin-bottom: 0; }
+  .arch-label {
+    display: flex;
+    align-items: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .arch-boxes {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .arch-box {
+    flex: 1;
+    min-width: 130px;
+    padding: 14px 16px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--text);
+    position: relative;
+  }
+  .arch-box.moss { border-color: rgba(124, 179, 66, 0.4); background: linear-gradient(180deg, var(--bg-2) 0%, rgba(124, 179, 66, 0.06) 100%); }
+  .arch-box .name { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; font-weight: 500; }
+  .arch-box .desc { color: var(--text-dim); font-size: 11.5px; margin-top: 4px; line-height: 1.4; }
+
+  .arch-arrow {
+    text-align: center;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    margin: 4px 0;
+    grid-column: 2;
+  }
+
+  /* GRID LAYOUT for cards */
+  .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 768px) {
+    .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 38px; }
+    .arch-layer { grid-template-columns: 1fr; }
+  }
+
+  /* CARD */
+  .card {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 20px;
+    transition: all 0.2s;
+  }
+  .card:hover { border-color: rgba(124, 179, 66, 0.3); transform: translateY(-2px); }
+  .card .name { font-family: 'JetBrains Mono', monospace; font-size: 13.5px; font-weight: 600; color: var(--moss); margin-bottom: 6px; }
+  .card .desc { font-size: 13px; color: var(--text-mute); line-height: 1.5; }
+  .card .meta { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
+
+  /* STATS */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 32px; }
+  .stat {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .stat .num { font-family: 'JetBrains Mono', monospace; font-size: 26px; font-weight: 700; color: var(--moss); }
+  .stat .label { color: var(--text-dim); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 4px; }
+  @media (max-width: 768px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+
+  /* TIMELINE / ROADMAP */
+  .roadmap { position: relative; padding-left: 28px; }
+  .roadmap::before {
+    content: ''; position: absolute; left: 8px; top: 8px; bottom: 8px;
+    width: 2px; background: var(--line);
+  }
+  .roadmap-item {
+    position: relative;
+    padding: 0 0 28px 24px;
+  }
+  .roadmap-item::before {
+    content: ''; position: absolute; left: -24px; top: 4px;
+    width: 18px; height: 18px; border-radius: 50%;
+    background: var(--bg-1); border: 2px solid var(--line);
+  }
+  .roadmap-item.done::before { background: var(--moss); border-color: var(--moss); box-shadow: 0 0 0 4px var(--moss-soft); }
+  .roadmap-item.current::before { background: var(--bg-1); border-color: var(--moss); box-shadow: 0 0 0 4px var(--moss-soft); animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 8px rgba(124, 179, 66, 0.05); } }
+  .roadmap-item .ver { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; color: var(--moss); font-weight: 600; }
+  .roadmap-item .title { font-size: 16px; font-weight: 500; margin: 4px 0 6px; color: var(--text); }
+  .roadmap-item .detail { color: var(--text-mute); font-size: 13px; }
+  .roadmap-item .features {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .roadmap-item .features span {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 2px 8px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--text-mute);
+  }
+
+  /* CODE BLOCK */
+  .code {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 22px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    color: var(--text);
+    overflow-x: auto;
+    line-height: 1.7;
+  }
+  .code .kw { color: var(--indigo); }
+  .code .ty { color: var(--amber); }
+  .code .str { color: var(--moss); }
+  .code .cm { color: var(--text-dim); font-style: italic; }
+  .code .pn { color: var(--text-mute); }
+
+  /* COMPARISON TABLE */
+  .compare {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .compare table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .compare th, .compare td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--line-soft); }
+  .compare th { background: var(--bg-2); color: var(--text-mute); font-weight: 500; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .compare tr:last-child td { border-bottom: none; }
+  .compare td.mono { font-family: 'JetBrains Mono', monospace; }
+  .compare tr.us td:first-child { color: var(--moss); }
+  .compare tr.us { background: rgba(124, 179, 66, 0.05); }
+  .yes { color: var(--moss); }
+  .no { color: var(--rose); }
+  .partial { color: var(--amber); }
+
+  /* FOOTER */
+  footer {
+    border-top: 1px solid var(--line-soft);
+    padding: 40px 0;
+    margin-top: 64px;
+    color: var(--text-dim);
+    font-size: 12.5px;
+    text-align: center;
+  }
+  footer .moss { color: var(--moss); font-family: 'JetBrains Mono', monospace; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- HERO -->
+  <header class="hero">
+    <div class="hero-badge">
+      <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--moss);"></span>
+      v0.1 · SKELETON READY
+    </div>
+    <h1>Moss<span class="accent">·</span>Term</h1>
+    <p class="tagline">
+      一个对标 WindTerm 的开源 SSH 客户端。<br>
+      Go + Wails 构建，TypeScript 渲染，<span style="color:var(--moss);">Moss is green</span>。
+    </p>
+    <div class="hero-meta">
+      <div class="item"><span class="label">Module</span><span class="value moss">github.com/mossterm/mossterm</span></div>
+      <div class="item"><span class="label">Stack</span><span class="value">Go 1.22 · Wails 2 · React 18</span></div>
+      <div class="item"><span class="label">License</span><span class="value">MIT</span></div>
+      <div class="item"><span class="label">Status</span><span class="value">Skeleton · 90 files</span></div>
+    </div>
+  </header>
+
+  <!-- STATS -->
+  <div class="stats">
+    <div class="stat"><div class="num">90</div><div class="label">Files</div></div>
+    <div class="stat"><div class="num">~9.5k</div><div class="label">Lines of Code</div></div>
+    <div class="stat"><div class="num">16</div><div class="label">Go Packages</div></div>
+    <div class="stat"><div class="num">14+</div><div class="label">Core Interfaces</div></div>
+  </div>
+
+  <!-- 1. ARCHITECTURE -->
+  <section>
+    <div class="section-head">
+      <span class="num">01</span>
+      <h2>架构总览</h2>
+      <span class="sub">Layered · Event-driven · Cross-platform</span>
+    </div>
+    <div class="arch">
+      <div class="arch-layer">
+        <div class="arch-label">前端<br><span style="font-size:10px;text-transform:none;letter-spacing:0;">Webview</span></div>
+        <div class="arch-boxes">
+          <div class="arch-box moss">
+            <div class="name">xterm.js + WebGL</div>
+            <div class="desc">终端渲染、字符网格、主题、链接识别</div>
+          </div>
+          <div class="arch-box">
+            <div class="name">React UI</div>
+            <div class="desc">Tab / Tree / SFTP / Palette / Status</div>
+          </div>
+          <div class="arch-box">
+            <div class="name">Zustand Stores</div>
+            <div class="desc">app / connection / ui / terminal</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arch-arrow">↓ Wails Bridge (JS↔Go RPC + Events) ↓</div>
+
+      <div class="arch-layer">
+        <div class="arch-label">胶水层<br><span style="font-size:10px;text-transform:none;letter-spacing:0;">Wails Bindings</span></div>
+        <div class="arch-boxes">
+          <div class="arch-box">
+            <div class="name">wailsbindings.Api</div>
+            <div class="desc">把 Go 方法暴露成 TS 异步函数</div>
+          </div>
+          <div class="arch-box">
+            <div class="name">App lifecycle</div>
+            <div class="desc">OnStartup · OnDomReady · OnShutdown</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arch-arrow">↓</div>
+
+      <div class="arch-layer">
+        <div class="arch-label">业务层<br><span style="font-size:10px;text-transform:none;letter-spacing:0;">Core</span></div>
+        <div class="arch-boxes">
+          <div class="arch-box">
+            <div class="name">session.Manager</div>
+            <div class="desc">多会话生命周期、订阅、状态机</div>
+          </div>
+          <div class="arch-box">
+            <div class="name">config.Manager</div>
+            <div class="desc">TOML 加载、profile CRUD、热更新</div>
+          </div>
+          <div class="arch-box">
+            <div class="name">secret.Store</div>
+            <div class="desc">系统 keyring、凭据缓存、加密</div>
+          </div>
+          <div class="arch-box">
+            <div class="name">plugin.Registry</div>
+            <div class="desc">WASM 插件加载、隔离、生命周期</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arch-arrow">↓</div>
+
+      <div class="arch-layer">
+        <div class="arch-label">协议层<br><span style="font-size:10px;text-transform:none;letter-spacing:0;">Connectors</span></div>
+        <div class="arch-boxes">
+          <div class="arch-box moss">
+            <div class="name">connect.Connector</div>
+            <div class="desc">统一接口：SSH / Telnet / Serial / Tcp</div>
+          </div>
+          <div class="arch-box">
+            <div class="name">sshclient</div>
+            <div class="desc">基于 x/crypto/ssh</div>
+          </div>
+          <div class="arch-box">
+            <div class="name">sftpclient</div>
+            <div class="desc">基于 pkg/sftp</div>
+          </div>
+          <div class="arch-box">
+            <div class="name">pty</div>
+            <div class="desc">creack/pty 跨平台封装</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arch-arrow">↓</div>
+
+      <div class="arch-layer">
+        <div class="arch-label">系统层<br><span style="font-size:10px;text-transform:none;letter-spacing:0;">OS</span></div>
+        <div class="arch-boxes">
+          <div class="arch-box">
+            <div class="name">PTY Device</div>
+            <div class="desc">macOS / Linux / Windows</div>
+          </div>
+          <div class="arch-box">
+            <div class="name">TCP / Unix Socket</div>
+            <div class="desc">net 包</div>
+          </div>
+          <div class="arch-box">
+            <div class="name">Keyring</div>
+            <div class="desc">Keychain / Credential Mgr / Secret Service</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. MODULES -->
+  <section>
+    <div class="section-head">
+      <span class="num">02</span>
+      <h2>模块划分</h2>
+      <span class="sub">16 Go packages · 4 Frontend layers</span>
+    </div>
+    <div class="grid-3">
+      <div class="card">
+        <div class="name">cmd/mossterm</div>
+        <div class="desc">主入口。解析 CLI flag、构造 App、启动 Wails 窗口、信号处理优雅关闭。</div>
+        <div class="meta">main.go · ~95 lines</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/app</div>
+        <div class="desc">应用生命周期。聚合所有 Manager、响应 OnStartup / OnDomReady / OnShutdown 钩子。</div>
+        <div class="meta">app.go</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/session</div>
+        <div class="desc">业务层会话。状态机：Connecting → Authenticating → Established → Closing → Closed → Failed。三个 goroutine：connect / read / write。</div>
+        <div class="meta">session.go · manager.go</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/connect</div>
+        <div class="desc">协议无关的连接抽象。Connector 接口 + AuthMethod sum-type + 全局 Registry 注册中心。</div>
+        <div class="meta">connector.go · factory.go · registry.go</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/sshclient</div>
+        <div class="desc">SSH 客户端。基于 golang.org/x/crypto/ssh，支持 password / publickey / agent / keyboard-interactive。</div>
+        <div class="meta">client.go</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/sftpclient</div>
+        <div class="desc">SFTP 客户端。基于 pkg/sftp，封装 list / upload / download / mkdir / rename。</div>
+        <div class="meta">client.go</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/pty</div>
+        <div class="desc">PTY 封装。基于 creack/pty，跨平台抽象，Resize / SetWinSize。</div>
+        <div class="meta">pty.go</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/config</div>
+        <div class="desc">配置管理。TOML 格式、热加载、profile 树、默认值合并。</div>
+        <div class="meta">config.go · loader.go</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/secret</div>
+        <div class="desc">凭据存储。系统 keyring 集成（macOS Keychain / Windows Cred Mgr / Linux Secret Service）。</div>
+        <div class="meta">secret.go · keyring.go</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/transfer</div>
+        <div class="desc">文件传输引擎。多连接并发、限速、断点续传、校验。</div>
+        <div class="meta">transfer.go</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/tunnel</div>
+        <div class="desc">端口转发。本地 / 远程 / 动态（SOCKS），独立 goroutine 池。</div>
+        <div class="meta">tunnel.go</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/agent</div>
+        <div class="desc">跳板链。ChainProxy / 多跳代理、连接复用。</div>
+        <div class="meta">agent.go</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/plugin</div>
+        <div class="desc">插件骨架。WASM 沙箱（wazero）、权限模型、生命周期管理。</div>
+        <div class="meta">plugin.go</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/ai</div>
+        <div class="desc">AI 辅助。命令解释、日志总结、批量命令生成、Provider 抽象。</div>
+        <div class="meta">ai.go</div>
+      </div>
+      <div class="card">
+        <div class="name">internal/ui/wailsbindings</div>
+        <div class="desc">Wails 绑定层。把 Go 方法暴露成前端可调用的异步 API。</div>
+        <div class="meta">api.go</div>
+      </div>
+      <div class="card">
+        <div class="name">pkg/mossterm</div>
+        <div class="desc">公共 API。供外部工具/插件引用的稳定入口。</div>
+        <div class="meta">mossterm.go</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. CORE INTERFACES -->
+  <section>
+    <div class="section-head">
+      <span class="num">03</span>
+      <h2>关键接口契约</h2>
+      <span class="sub">Skeleton · 14+ contracts</span>
+    </div>
+    <div class="code">
+<span class="cm">// 协议适配器必须实现的契约</span>
+<span class="kw">type</span> <span class="ty">Connector</span> <span class="kw">interface</span> {
+    <span class="ty">Dial</span>(ctx context.Context, params DialParams) (net.Conn, <span class="ty">error</span>)
+    <span class="ty">OpenSession</span>(ctx context.Context, conn net.Conn, opts SessionOpts) (Session, <span class="ty">error</span>)
+}
+
+<span class="cm">// 业务层会话（区别于协议层 Session）</span>
+<span class="kw">type</span> <span class="ty">Session</span> <span class="kw">interface</span> {
+    <span class="ty">Start</span>(ctx context.Context) <span class="ty">error</span>
+    <span class="ty">Input</span>(data []<span class="ty">byte</span>) <span class="ty">error</span>
+    <span class="ty">Resize</span>(cols, rows <span class="ty">int</span>) <span class="ty">error</span>
+    <span class="ty">Subscribe</span>() (&lt;-<span class="kw">chan</span> Event, <span class="kw">func</span>())
+    <span class="ty">Close</span>(force <span class="ty">bool</span>) <span class="ty">error</span>
+    <span class="ty">Info</span>() Info
+    <span class="ty">State</span>() State
+}
+
+<span class="cm">// 认证方法 sum-type（私有方法模式防止包外扩展）</span>
+<span class="kw">type</span> <span class="ty">AuthMethod</span> <span class="kw">interface</span>{ authMethod() }
+<span class="kw">type</span> <span class="ty">PasswordAuth</span> <span class="ty">string</span>
+<span class="kw">type</span> <span class="ty">PublicKeyAuth</span> <span class="kw">struct</span> { Signer ssh.Signer; Passphrase <span class="ty">string</span> }
+<span class="kw">type</span> <span class="ty">AgentAuth</span> <span class="kw">struct</span>{}
+<span class="kw">type</span> <span class="ty">KeyboardInteractiveAuth</span> <span class="kw">struct</span>{}
+
+<span class="cm">// 状态机</span>
+<span class="kw">const</span> (
+    StateConnecting      State = <span class="ty">iota</span>
+    StateAuthenticating
+    StateEstablished
+    StateClosing
+    StateClosed
+    StateFailed
+)
+    </div>
+  </section>
+
+  <!-- 4. FRONTEND STACK -->
+  <section>
+    <div class="section-head">
+      <span class="num">04</span>
+      <h2>前端技术栈</h2>
+      <span class="sub">React + TypeScript + xterm.js</span>
+    </div>
+    <div class="grid-4">
+      <div class="card">
+        <div class="name">React 18</div>
+        <div class="desc">UI 框架。函数组件 + Hooks，并发模式。</div>
+      </div>
+      <div class="card">
+        <div class="name">TypeScript</div>
+        <div class="desc">严格模式。DTO 与 Go 字段一一对应。</div>
+      </div>
+      <div class="card">
+        <div class="name">Vite</div>
+        <div class="desc">开发服务器 + 构建。HMR 秒级响应。</div>
+      </div>
+      <div class="card">
+        <div class="name">Tailwind</div>
+        <div class="desc">原子化样式。Moss 绿暗色主题。</div>
+      </div>
+      <div class="card">
+        <div class="name">xterm.js</div>
+        <div class="desc">工业级终端。WebGL / Canvas / DOM 三渲染后端。</div>
+      </div>
+      <div class="card">
+        <div class="name">Zustand</div>
+        <div class="desc">轻量状态管理。7 个独立 store。</div>
+      </div>
+      <div class="card">
+        <div class="name">Lucide</div>
+        <div class="desc">图标库。1000+ 矢量图标，tree-shakable。</div>
+      </div>
+      <div class="card">
+        <div class="name">Wails 2</div>
+        <div class="desc">Webview 桥接层。Go ↔ JS RPC + 事件。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5. ROADMAP -->
+  <section>
+    <div class="section-head">
+      <span class="num">05</span>
+      <h2>路线图</h2>
+      <span class="sub">From MVP to v2.0</span>
+    </div>
+    <div class="roadmap">
+      <div class="roadmap-item done">
+        <div class="ver">v0.0</div>
+        <div class="title">骨架就位</div>
+        <div class="detail">架构设计、目录结构、接口契约、构建脚本、CI、文档。</div>
+        <div class="features">
+          <span>ARCHITECTURE.md</span>
+          <span>90 文件</span>
+          <span>16 包</span>
+          <span>Makefile + CI</span>
+        </div>
+      </div>
+      <div class="roadmap-item current">
+        <div class="ver">v0.1 · 进行中</div>
+        <div class="title">能 SSH 进去</div>
+        <div class="detail">单 session SSH + 密码/密钥认证 + xterm.js 基础渲染 + 复制粘贴 + 关闭。验收标准：连上后能跑命令。</div>
+        <div class="features">
+          <span>SSH client</span>
+          <span>PTY</span>
+          <span>Wails bindings</span>
+          <span>基础 UI</span>
+        </div>
+      </div>
+      <div class="roadmap-item">
+        <div class="ver">v0.5</div>
+        <div class="title">能替代日常</div>
+        <div class="detail">多 tab、多窗格分屏、Session Tree、SFTP 侧栏、跳板链、端口转发、配置持久化。</div>
+        <div class="features">
+          <span>Multi-tab</span>
+          <span>Split pane</span>
+          <span>SFTP</span>
+          <span>Jump host</span>
+          <span>Tunnel</span>
+        </div>
+      </div>
+      <div class="roadmap-item">
+        <div class="ver">v1.0</div>
+        <div class="title">正面刚 WindTerm</div>
+        <div class="detail">全协议（Telnet/Serial/Tcp）、性能压测、命令面板、quickbar、sync input、scp、x11 转发。</div>
+        <div class="features">
+          <span>全协议</span>
+          <span>Command Palette</span>
+          <span>Sync Input</span>
+          <span>性能基准</span>
+        </div>
+      </div>
+      <div class="roadmap-item">
+        <div class="ver">v2.0</div>
+        <div class="title">超越 WindTerm</div>
+        <div class="detail">WASM 插件系统、AI 辅助、团队配置同步、主题商店、移动端 web 远程、远端协作文档。</div>
+        <div class="features">
+          <span>Plugin SDK</span>
+          <span>AI Copilot</span>
+          <span>云同步</span>
+          <span>移动远程</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6. COMPARISON -->
+  <section>
+    <div class="section-head">
+      <span class="num">06</span>
+      <h2>差异化定位</h2>
+      <span class="sub">vs WindTerm / Tabby / Electerm</span>
+    </div>
+    <div class="compare">
+      <table>
+        <thead>
+          <tr>
+            <th>维度</th>
+            <th>WindTerm</th>
+            <th>Tabby</th>
+            <th>Electerm</th>
+            <th>SecureCRT</th>
+            <th style="color:var(--moss);">MossTerm</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>开源</td>
+            <td><span class="no">闭源</span></td>
+            <td><span class="yes">MIT</span></td>
+            <td><span class="yes">MIT</span></td>
+            <td><span class="no">商业</span></td>
+            <td class="us"><span class="yes">MIT</span></td>
+          </tr>
+          <tr>
+            <td>可审计</td>
+            <td><span class="no">否</span></td>
+            <td><span class="yes">是</span></td>
+            <td><span class="yes">是</span></td>
+            <td><span class="no">否</span></td>
+            <td class="us"><span class="yes">是 + 依赖全开源</span></td>
+          </tr>
+          <tr>
+            <td>渲染后端</td>
+            <td>自绘 Qt</td>
+            <td>Electron</td>
+            <td>Electron</td>
+            <td>自绘原生</td>
+            <td class="us">xterm.js + WebGL</td>
+          </tr>
+          <tr>
+            <td>二进制大小</td>
+            <td>~30MB</td>
+            <td>~120MB</td>
+            <td>~150MB</td>
+            <td>~80MB</td>
+            <td class="us">~15-20MB</td>
+          </tr>
+          <tr>
+            <td>启动速度</td>
+            <td><span class="yes">极快</span></td>
+            <td><span class="partial">慢</span></td>
+            <td><span class="partial">慢</span></td>
+            <td><span class="yes">快</span></td>
+            <td class="us"><span class="yes">快</span></td>
+          </tr>
+          <tr>
+            <td>插件系统</td>
+            <td><span class="no">无</span></td>
+            <td><span class="partial">有限</span></td>
+            <td><span class="no">无</span></td>
+            <td><span class="partial">脚本</span></td>
+            <td class="us"><span class="yes">WASM</span></td>
+          </tr>
+          <tr>
+            <td>AI 辅助</td>
+            <td><span class="no">无</span></td>
+            <td><span class="no">无</span></td>
+            <td><span class="no">无</span></td>
+            <td><span class="no">无</span></td>
+            <td class="us"><span class="yes">内置</span></td>
+          </tr>
+          <tr>
+            <td>社区参与</td>
+            <td><span class="no">作者一人</span></td>
+            <td><span class="yes">活跃</span></td>
+            <td><span class="partial">中等</span></td>
+            <td><span class="no">闭门</span></td>
+            <td class="us"><span class="yes">开放治理</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 7. FILE TREE -->
+  <section>
+    <div class="section-head">
+      <span class="num">07</span>
+      <h2>项目结构</h2>
+      <span class="sub">90 files · ~9.5k LoC</span>
+    </div>
+    <div class="code">
+<span class="cm">MossTerm/</span>
+├── <span class="ty">cmd/mossterm/</span>                <span class="cm"># 主入口</span>
+│   └── main.go
+├── <span class="ty">internal/</span>                  <span class="cm"># 业务核心</span>
+│   ├── app/                          <span class="cm"># App 生命周期</span>
+│   ├── session/                      <span class="cm"># 会话管理</span>
+│   ├── connect/                      <span class="cm"># 协议抽象 + 注册</span>
+│   ├── sshclient/                    <span class="cm"># SSH 客户端</span>
+│   ├── sftpclient/                   <span class="cm"># SFTP 客户端</span>
+│   ├── pty/                          <span class="cm"># PTY 封装</span>
+│   ├── config/                       <span class="cm"># 配置管理</span>
+│   ├── secret/                       <span class="cm"># 凭据 + keyring</span>
+│   ├── transfer/                     <span class="cm"># 文件传输</span>
+│   ├── tunnel/                       <span class="cm"># 端口转发</span>
+│   ├── agent/                        <span class="cm"># 跳板链</span>
+│   ├── plugin/                       <span class="cm"># 插件系统</span>
+│   ├── ai/                           <span class="cm"># AI 辅助</span>
+│   └── ui/wailsbindings/             <span class="cm"># Wails 绑定</span>
+├── <span class="ty">pkg/mossterm/</span>                <span class="cm"># 公共 API</span>
+├── <span class="ty">frontend/</span>                    <span class="cm"># React + xterm.js</span>
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── layout/               <span class="cm"># MainLayout / TitleBar / StatusBar</span>
+│   │   │   ├── terminal/             <span class="cm"># Terminal / TerminalView</span>
+│   │   │   ├── tabs/                 <span class="cm"># TabBar / Tab</span>
+│   │   │   ├── session/              <span class="cm"># SessionTree / SessionForm</span>
+│   │   │   ├── sftp/                 <span class="cm"># SftpPanel / FileList</span>
+│   │   │   ├── palette/              <span class="cm"># CommandPalette</span>
+│   │   │   └── common/               <span class="cm"># Button / Modal / Tooltip</span>
+│   │   ├── stores/                   <span class="cm"># Zustand</span>
+│   │   ├── hooks/                    <span class="cm"># useWailsEvent / useTerminal / useShortcut</span>
+│   │   ├── types/                    <span class="cm"># 镜像 Go DTO</span>
+│   │   └── utils/                    <span class="cm"># format / keymap / logger</span>
+│   ├── wailsjs/                      <span class="cm"># Wails 自动生成</span>
+│   ├── package.json
+│   ├── vite.config.ts
+│   └── tailwind.config.js
+├── <span class="ty">docs/</span>                       <span class="cm"># 设计文档</span>
+│   ├── ARCHITECTURE.md               <span class="cm"># 1364 行架构</span>
+│   ├── DEVELOPMENT.md
+│   ├── QUICKSTART.md
+│   └── user-guide/
+├── <span class="ty">configs/</span>                    <span class="cm"># 配置模板</span>
+│   └── config.example.toml
+├── <span class="ty">scripts/</span>                    <span class="cm"># 构建/安装脚本</span>
+│   ├── install.sh / install.ps1
+│   ├── build.sh
+│   └── dev.sh
+├── <span class="ty">.github/workflows/</span>           <span class="cm"># CI 矩阵</span>
+├── Makefile
+├── README.md
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── LICENSE                           <span class="cm"># MIT</span>
+└── go.mod
+    </div>
+  </section>
+
+  <!-- 8. NEXT STEPS -->
+  <section>
+    <div class="section-head">
+      <span class="num">08</span>
+      <h2>下一步</h2>
+      <span class="sub">From skeleton to v0.1</span>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="name">1 · 安装环境</div>
+        <div class="desc">
+          安装 Go 1.22+、Node 18+、Wails CLI 2.x。<br>
+          <span class="mono" style="color:var(--moss);">./scripts/install.sh</span> 一键搞定（macOS / Linux），Windows 跑 <span class="mono" style="color:var(--moss);">.\scripts\install.ps1</span>。
+        </div>
+      </div>
+      <div class="card">
+        <div class="name">2 · 启动开发</div>
+        <div class="desc">
+          <span class="mono" style="color:var(--moss);">make wailsdev</span> 启动 Wails dev 模式。<br>
+          或 <span class="mono" style="color:var(--moss);">make dev</span> 同时跑 Go 后端 + Vite 前端。
+        </div>
+      </div>
+      <div class="card">
+        <div class="name">3 · 实现 SSH 客户端</div>
+        <div class="desc">
+          把 <span class="mono">internal/sshclient/client.go</span> 从 stub 变成真实现。<br>
+          基于 <span class="mono">golang.org/x/crypto/ssh</span>，参考架构文档第 6 章接口契约。
+        </div>
+      </div>
+      <div class="card">
+        <div class="name">4 · 联通 Wails 绑定</div>
+        <div class="desc">
+          实现 <span class="mono">internal/ui/wailsbindings/api.go</span> 的方法，<br>
+          让前端能调 <span class="mono">OpenSession</span> / <span class="mono">SendInput</span> / <span class="mono">Resize</span> / <span class="mono">Close</span>。
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span class="moss">Moss is green</span> · Made with 🌱 by MossTerm Authors · MIT License · 2026
+  </footer>
+
+</div>
+</body>
+</html>

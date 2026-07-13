@@ -1,0 +1,41 @@
+# MossTerm EditorConfig —— https://editorconfig.org
+# 保持团队代码风格一致；编辑器插件会自动应用。
+
+root = true
+
+[*]
+charset            = utf-8
+end_of_line        = lf
+indent_style       = space
+indent_size        = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Markdown 文档里末尾两个空格表示换行，trim 会破坏语义
+[*.md]
+trim_trailing_whitespace = false
+
+# Makefile 必须用 tab 缩进
+[Makefile]
+indent_style = tab
+
+# Shell 脚本
+[*.{sh,bash}]
+indent_size = 4
+
+# PowerShell
+[*.ps1]
+indent_size = 4
+
+# Go 已自带 gofmt
+[*.go]
+indent_style = tab
+indent_size  = 4
+
+# 前端代码
+[*.{js,jsx,ts,tsx,vue,svelte}]
+indent_size = 2
+
+# JSON / YAML / TOML
+[*.{json,yml,yaml,toml}]
+indent_size = 2

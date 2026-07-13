@@ -1,0 +1,56 @@
+/**
+ * 主题色 CSS 变量
+ * --------------------------------------------------------------------
+ * 与 tailwind.config.js 的 colors 块镜像。任何修改必须两边同步。
+ * 提供 :root 暗色 / [data-theme="light"] 亮色两套，方便后续切换。
+ */
+
+:root,
+:root[data-theme="dark"] {
+  --color-bg: #1a1d23;
+  --color-surface: #22262e;
+  --color-border: #2e333d;
+  --color-hover: #2a2f38;
+
+  --color-accent: #7CB342;
+  --color-accent-soft: rgba(124, 179, 66, 0.15);
+  --color-accent-strong: #8fc957;
+
+  --color-ink: #e4e6eb;
+  --color-ink-muted: #9aa0a6;
+  --color-ink-subtle: #6c7280;
+
+  --color-ok: #7CB342;
+  --color-warn: #f0a830;
+  --color-err: #e5484d;
+  --color-info: #5aa9e6;
+
+  /* xterm.js 主题（与 Terminal.tsx 中的 Moss 主题镜像） */
+  --xterm-bg: #1a1d23;
+  --xterm-fg: #e4e6eb;
+  --xterm-cursor: #7CB342;
+  --xterm-cursor-accent: #1a1d23;
+  --xterm-selection: rgba(124, 179, 66, 0.35);
+
+  --shadow-1: 0 1px 0 rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+/* 预留：未来亮色主题（v0.x 暂未启用） */
+:root[data-theme="light"] {
+  --color-bg: #fafbfc;
+  --color-surface: #ffffff;
+  --color-border: #e2e5ea;
+  --color-hover: #f1f3f5;
+  --color-ink: #1a1d23;
+  --color-ink-muted: #5b6168;
+  --color-ink-subtle: #9aa0a6;
+  --xterm-bg: #fafbfc;
+  --xterm-fg: #1a1d23;
+}
+
+/* 主题切换平滑过渡 */
+html.theme-transition,
+html.theme-transition * {
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}

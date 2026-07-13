@@ -1,0 +1,122 @@
+# ===== MossTerm .gitignore =====
+
+# ---------- Go ----------
+# 编译产物
+/bin/
+/build/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试输出
+*.test
+*.out
+coverage.out
+coverage.html
+*.coverprofile
+profile.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# 依赖 / vendor（仅在使用 vendor 模式时忽略）
+/vendor/
+
+# 静态分析/工具缓存
+.gocache/
+.golangci-lint/
+
+# ---------- Node / 前端 / Wails ----------
+node_modules/
+# frontend/dist/ 目录本身保留（占位 index.html 让 go embed 编译过）；
+# wails dev/build 会覆盖里面内容。
+!/frontend/dist/
+!/frontend/dist/index.html
+/frontend/build/
+/frontend/node_modules/
+/frontend/.vite/
+/frontend/.nuxt/
+/frontend/.next/
+/frontend/.cache/
+
+# Wails 生成的 bindings（按需忽略；如要纳入版本控制请删此行）
+# /frontend/wailsjs/
+
+# 前端环境变量
+.env
+.env.local
+.env.*.local
+frontend/.env
+frontend/.env.local
+
+# npm / yarn / pnpm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tgz
+.pnpm-store/
+
+# ---------- IDE / 编辑器 ----------
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+*.iml
+
+# ---------- 密钥 / 凭据 / 真实配置 ----------
+# SSH 私钥
+*.key
+*.pem
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+id_ecdsa
+id_ecdsa.pub
+known_hosts
+
+# 真实配置（只提交 configs/config.example.toml）
+config.toml
+config.local.toml
+configs/*.local.toml
+
+# 凭据 / token
+*.token
+*.credentials
+secrets.yaml
+secrets.json
+
+# 加密的 keyring 测试产物
+*.keyring
+*.keystore
+
+# ---------- 运行时 / 日志 ----------
+*.log
+logs/
+/tmp/
+/.cache/
+
+# ---------- OS ----------
+.AppleDouble
+.LSOverride
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+ehthumbs.db
+$RECYCLE.BIN/

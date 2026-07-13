@@ -1,0 +1,217 @@
+name: ci
+
+# MossTerm CI —— 跑三件事：
+#  1. 代码质量：lint（go + ts）+ vet + 格式检查
+#  2. 测试：单元测试（带 race）+ 构建产物 smoke
+#  3. 跨平台构建：darwin / linux / windows
+#
+# 注意：Wails 应用最终产物在 `wails build` 阶段生成，
+#       本 workflow 暂以 `go build ./cmd/mossterm` 走通 CI 骨架，
+#       接入 Wails 的 desktop build 见 .github/workflows/release.yml（待补）。
+
+on:
+  push:
+    branches: [main, develop, release/**]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+# 取消同一 ref 上正在跑的旧 run
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 最小权限
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.22"
+  NODE_VERSION: "20"
+  # 本仓库的 module 路径，供 go test 引用
+  GO_PACKAGE: github.com/mossterm/mossterm
+
+jobs:
+  # ============================================================
+  # Job 1: 代码质量（Go lint + 前端 lint，单平台跑就够快）
+  # ============================================================
+  quality:
+    name: quality (lint + vet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: go mod download
+        run: go mod download
+
+      - name: gofmt 检查
+        run: |
+          if [ "$(gofmt -l . | wc -l)" -ne 0 ]; then
+            echo "以下文件未通过 gofmt："
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+          only-new-issues: ${{ github.event_name == 'pull_request' }}
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      # 前端 lint（如未配 eslint 可注释掉）
+      - name: 前端依赖安装
+        run: |
+          if [ -f frontend/package.json ]; then
+            cd frontend && npm ci || npm install
+          else
+            echo "frontend/package.json 暂未就绪，跳过"
+          fi
+        continue-on-error: true
+
+      - name: 前端 lint / typecheck
+        run: |
+          if [ -f frontend/package.json ]; then
+            cd frontend
+            npm run lint || echo "lint 暂未配置"
+            npm run typecheck || echo "typecheck 暂未配置"
+          fi
+        continue-on-error: true
+
+  # ============================================================
+  # Job 2: 单元测试（多平台都跑，覆盖 race detector）
+  # ============================================================
+  test:
+    name: test (${{ matrix.os }})
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      - name: go test (race + coverage)
+        run: |
+          go test -race -shuffle=on -coverprofile=coverage.out -covermode=atomic ./...
+        shell: bash
+
+      - name: Coverage 摘要
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          go install github.com/boumenot/gocover-cobertura@latest
+          go run github.com/boumenot/gocover-cobertura@latest < coverage.out > coverage-cobertura.xml || true
+
+      - name: 上传 coverage 到 Codecov
+        if: matrix.os == 'ubuntu-latest'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.out
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: 归档 coverage
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}
+          path: coverage.out
+
+  # ============================================================
+  # Job 3: 跨平台构建产物（只 go build cmd/mossterm 跑通骨架）
+  # ============================================================
+  build:
+    name: build (${{ matrix.os }})
+    needs: [quality, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            ext: ""
+            archive: tar.gz
+            bin: mossterm
+          - os: macos-latest
+            ext: ""
+            archive: tar.gz
+            bin: mossterm
+          - os: windows-latest
+            ext: ".exe"
+            archive: zip
+            bin: mossterm.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      - name: 构建二进制
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" \
+            -o "dist/${{ matrix.bin }}" \
+            ./cmd/mossterm
+
+      - name: 打包归档
+        run: |
+          cd dist
+          if [ "${{ matrix.archive }}" = "tar.gz" ]; then
+            tar -czf "mossterm-${{ matrix.os }}.tar.gz" "${{ matrix.bin }}"
+          else
+            powershell -NoProfile -Command "Compress-Archive -Path '${{ matrix.bin }}' -DestinationPath 'mossterm-${{ matrix.os }}.zip'"
+          fi
+        shell: bash
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: mossterm-${{ matrix.os }}
+          path: |
+            dist/${{ matrix.bin }}
+            dist/mossterm-${{ matrix.os }}.*
+          if-no-files-found: warn
