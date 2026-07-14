@@ -5,17 +5,20 @@
  *   - 点击切换活跃
  *   - 中键 / close 按钮关闭
  *   - 右侧 + 按钮新建空 tab
- *   - 右侧 SFTP 按钮打开当前 session 的 SFTP 浏览器（v0.5.1）
+ *   - 右侧 SFTP 按钮：v0.5.8 起调 `addSftpPane` 在当前 tab 嵌入 SFTP pane
+ *     （之前 v0.5.1 是开 modal；v0.5.8 改为 pane 树主路径，modal 仍保留）
  *   - Ctrl/Cmd+T 新建；Ctrl/Cmd+W 关闭当前
  *
  * v0.5.0 B：始终渲染（即便 tabs 为空也显示 +），方便用户随时开新会话。
  * v0.5.1   ：加 SFTP 浏览器按钮（FolderOpen 图标）。
+ * v0.5.8   ：SFTP 按钮改调 `addSftpPane(activeTabId, tab.sessionId)`；
+ *            tab title 后缀加 pane kind 统计（"term" / "+1 sftp"）。
  */
 import { Plus, FolderOpen } from "lucide-react";
 import { useTabsStore } from "./tabsStore";
+import { collectLeaves, treeHasLeafOfKind } from "./paneTree";
 import { Tab } from "./Tab";
 import { useUIStore } from "@stores/uiStore";
-import { useSftpBrowserStore } from "@components/sftp/sftpBrowserStore";
 import { useShortcut } from "@hooks/useShortcut";
 import clsx from "clsx";
 
@@ -29,8 +32,8 @@ export function TabBar({ className }: TabBarProps): JSX.Element {
   const setActive  = useTabsStore((s) => s.setActiveTab);
   const addTab     = useTabsStore((s) => s.addTab);
   const removeTab  = useTabsStore((s) => s.removeTab);
+  const addSftpPane = useTabsStore((s) => s.addSftpPane);
   const openPalette = useUIStore((s) => s.openCommandPalette);
-  const openSftp    = useSftpBrowserStore((s) => s.open);
   const pushToast   = useUIStore((s) => s.pushToast);
 
   // 新建一个空 tab；title 暂时显示 "New Tab"，连上 session 后由 openSession
@@ -62,9 +65,11 @@ export function TabBar({ className }: TabBarProps): JSX.Element {
     },
   });
 
-  // 打开 SFTP 浏览器 —— 取当前 active tab 的 sessionId。
-  // 没有 active tab / tab 没绑 session：弹 toast 提示，不静默失败。
-  const onOpenSftp = (): void => {
+  // v0.5.8：在当前 active tab 嵌入 SFTP pane。
+  //   - 拿不到 active tab / tab 没绑 session：弹 toast 提示，不静默失败
+  //   - tab 已含 SFTP leaf：仍允许加（"再开一个"，每次都是独立 path 状态；
+  //     关闭其中一个不影响其他，符合 v0.5.1 用户对 "SFTP 浏览器" 的预期）
+  const onAddSftpPane = (): void => {
     const id = useTabsStore.getState().activeTabId;
     if (!id) {
       pushToast({
@@ -75,16 +80,9 @@ export function TabBar({ className }: TabBarProps): JSX.Element {
       return;
     }
     const tab = useTabsStore.getState().tabs.find((t) => t.id === id);
-    const sid = tab?.sessionId ?? null;
-    if (!sid) {
-      pushToast({
-        level: "warn",
-        message: "当前 tab 还没绑 session —— 等待 SSH 连上",
-        durationMs: 2500,
-      });
-      return;
-    }
-    openSftp(sid);
+    if (!tab) return;
+    // 拿 session id：tab.sessionId 是后端 session；用之绑新 SFTP leaf
+    addSftpPane(id, tab.sessionId);
   };
 
   return (
@@ -115,18 +113,40 @@ export function TabBar({ className }: TabBarProps): JSX.Element {
       </button>
 
       {/*
-        v0.5.1 SFTP 浏览器按钮：开当前 active tab 的 session。
-        始终渲染；点击时校验 session 是否就绪。
+        v0.5.8 SFTP 按钮：在当前 active tab 内追加 SFTP leaf（不再弹 modal）。
+        始终渲染；点击时校验 session 是否就绪（tab.sessionId == null 时
+        addSftpPane 传 null，pane 渲染 EmptyLeafHint 引导用户先连 SSH）。
        */}
       <button
-        onClick={onOpenSftp}
+        onClick={onAddSftpPane}
         className="ml-0.5 flex h-9 w-9 shrink-0 items-center justify-center text-ink-muted hover:bg-moss-hover hover:text-accent"
-        title="SFTP 浏览器"
-        aria-label="SFTP 浏览器"
-        data-testid="sftp-browser-button"
+        title="在当前 tab 加 SFTP pane（v0.5.8：嵌入 Pane 树而非 modal）"
+        aria-label="Add SFTP pane"
+        data-testid="sftp-pane-button"
       >
         <FolderOpen size={14} />
       </button>
     </div>
   );
 }
+
+// =====================================================================
+// helpers —— Tab 内部用
+// =====================================================================
+
+/** 计算 tab 的 pane 概要：terminal / sftp 数量。 */
+function summarizePanes(tab: import("./tabsStore").Tab): { term: number; sftp: number } {
+  const leaves = collectLeaves(tab.panes);
+  return {
+    term: leaves.filter((p) => p.kind === "terminal").length,
+    sftp: leaves.filter((p) => p.kind === "sftp").length,
+  };
+}
+
+/** 树里是否含 SFTP leaf（v0.5.8 Tab title 后缀用）。 */
+function hasSftpLeaf(tab: import("./tabsStore").Tab): boolean {
+  return treeHasLeafOfKind(tab.panes, "sftp");
+}
+
+// 保留给 Tab 用（v0.5.8 Tab title 显示）
+export { summarizePanes, hasSftpLeaf };

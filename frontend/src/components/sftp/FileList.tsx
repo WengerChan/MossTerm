@@ -27,7 +27,11 @@ export function FileList({ sessionId, path }: FileListProps): JSX.Element {
   const cd          = useSftpStore((s) => s.cd);
   const pushToast   = useUIStore((s) => s.pushToast);
 
-  const rawEntries: ReadonlyArray<Entry> = entriesMap[path] ?? [];
+  // 把 `?? []` 放进 useMemo 避免每次 render 返回新数组触发 exhaustive-deps 警告
+  const rawEntries: ReadonlyArray<Entry> = useMemo(
+    () => entriesMap[path] ?? [],
+    [entriesMap, path],
+  );
   const nextToken: string = tokenMap[path] ?? "";
 
   // 排序

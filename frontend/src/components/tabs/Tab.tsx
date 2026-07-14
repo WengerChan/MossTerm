@@ -7,10 +7,13 @@
  *   - 左侧圆点反映 tab 状态（idle / connecting / established / failed / closed）
  *   - close 按钮：选中时常显，未选中时仅 hover 显示
  *   - 中键关闭
+ *   - **v0.5.8**：title 后缀显示 pane 概要 —— "term ×2 / sftp ×1"，
+ *     方便用户一眼看出 tab 内 pane 树组成
  */
-import { X } from "lucide-react";
+import { FolderOpen, X } from "lucide-react";
 import clsx from "clsx";
 import type { Tab as TabType, TabState } from "./tabsStore";
+import { summarizePanes } from "./TabBar";
 
 export interface TabProps {
   tab: TabType;
@@ -39,6 +42,8 @@ const STATE_LABEL: Record<TabState, string> = {
 };
 
 export function Tab({ tab, active, onClick, onClose }: TabProps): JSX.Element {
+  const summary = summarizePanes(tab);
+
   return (
     <div
       onClick={onClick}
@@ -48,7 +53,7 @@ export function Tab({ tab, active, onClick, onClose }: TabProps): JSX.Element {
       }}
       title={`${tab.title} — ${STATE_LABEL[tab.state]}`}
       className={clsx(
-        "group relative flex h-9 min-w-[120px] max-w-[200px] cursor-pointer items-center gap-2 border-r border-moss-border px-3 text-sm",
+        "group relative flex h-9 min-w-[140px] max-w-[240px] cursor-pointer items-center gap-2 border-r border-moss-border px-3 text-sm",
         active
           ? "border-b-2 border-b-accent bg-moss-bg text-ink -mb-px"
           : "border-b-2 border-b-transparent bg-moss-surface text-ink-muted hover:bg-moss-hover hover:text-ink",
@@ -59,6 +64,10 @@ export function Tab({ tab, active, onClick, onClose }: TabProps): JSX.Element {
         aria-label={STATE_LABEL[tab.state]}
       />
       <span className="flex-1 truncate">{tab.title}</span>
+
+      {/* v0.5.8：pane 概要后缀（多个 terminal / 多个 sftp 时显示数量） */}
+      <PaneSummaryBadge term={summary.term} sftp={summary.sftp} />
+
       <button
         onClick={(e) => {
           e.stopPropagation();
@@ -74,5 +83,44 @@ export function Tab({ tab, active, onClick, onClose }: TabProps): JSX.Element {
         <X size={12} />
       </button>
     </div>
+  );
+}
+
+// =====================================================================
+// PaneSummaryBadge —— tab title 旁的小徽标
+// =====================================================================
+interface PaneSummaryBadgeProps {
+  term: number;
+  sftp: number;
+}
+
+/**
+ * 当 tab 有多个 pane 或含 SFTP 时显示：
+ *   - sftp 存在 → 显示 SFTP 图标（始终显示）
+ *   - terminal 数量 > 1 → 显示 "×N" 后缀
+ * 这样用户在 tab bar 上一眼能看到"这个 tab 有几个 terminal / 几个 sftp"。
+ */
+function PaneSummaryBadge({ term, sftp }: PaneSummaryBadgeProps): JSX.Element | null {
+  if (sftp === 0 && term <= 1) return null;
+  return (
+    <span className="flex shrink-0 items-center gap-1 text-[10px] text-ink-muted">
+      {sftp > 0 && (
+        <span
+          className="inline-flex items-center gap-0.5 rounded bg-accent/15 px-1 py-0.5 text-accent"
+          title={`${sftp} 个 SFTP pane`}
+        >
+          <FolderOpen size={10} aria-hidden />
+          {sftp > 1 && <span>×{sftp}</span>}
+        </span>
+      )}
+      {term > 1 && (
+        <span
+          className="rounded bg-moss-border px-1 py-0.5 text-ink-muted"
+          title={`${term} 个 terminal pane`}
+        >
+          term ×{term}
+        </span>
+      )}
+    </span>
   );
 }

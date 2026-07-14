@@ -235,6 +235,38 @@ func (c *Client) Rename(o, n string) error {
 	return nil
 }
 
+// Truncate 把远端 path 的文件截到 size 字节。
+//
+// v0.5.10 新增：streaming upload 在并发 WriteAt 之前先 Truncate 到 totalSize
+// 做预分配（让"磁盘满"等错误早暴露，避免在大量 chunk 都失败后才报错）。
+//
+// pkg/sftp 的 *Client.Truncate 在 path 不存在时返回 error；
+// 调用方应保证 path 已经被 OpenFile(O_CREATE) 创建过。
+func (c *Client) Truncate(p string, size int64) error {
+	if c.sc == nil {
+		return errors.New("sftpclient.Truncate: client closed")
+	}
+	if err := c.sc.Truncate(p, size); err != nil {
+		return fmt.Errorf("sftpclient.Truncate: %q to %d: %w", p, size, err)
+	}
+	return nil
+}
+
+// MkdirAll 递归创建远端目录（v0.5.10 新增）。
+//
+// pkg/sftp 提供 MkdirAll（sftp protocol 没有递归 mkdir，需要 client 拆）。
+// 用途：streaming.Upload 在 OpenFile 之前确保父目录存在
+// （多数 SFTP server 不自动创建父目录）。
+func (c *Client) MkdirAll(p string) error {
+	if c.sc == nil {
+		return errors.New("sftpclient.MkdirAll: client closed")
+	}
+	if err := c.sc.MkdirAll(p); err != nil {
+		return fmt.Errorf("sftpclient.MkdirAll: %q: %w", p, err)
+	}
+	return nil
+}
+
 // Close 关闭底层 SFTP 连接。
 //
 // 幂等：多次调用安全。Close 之后所有其它方法都会返回 "client closed" 错误。
@@ -373,8 +405,13 @@ type ListPage struct {
 // 之所以单独命名而不是直接嵌入 io.ReadWriteCloser，
 // 是为了让 wailsbindings/api.go 的方法签名更稳定：
 // 即使将来在 sftpclient 内部换成自定义接口也不破坏前端契约。
+//
+// v0.5.10 扩展加 io.WriterAt：streaming upload 走 WriteAt 并发分片
+// （pkg/sftp 的 *sftp.File 已实现 WriteAt）。扩展不破坏既有 caller
+// （SftpRead/Write/UploadFile 只用 Reader/Writer/Closer）。
 type ReadWriteCloser interface {
 	io.Reader
 	io.Writer
+	io.WriterAt
 	io.Closer
 }

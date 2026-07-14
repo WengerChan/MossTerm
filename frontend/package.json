@@ -12,7 +12,9 @@
     "wails:build": "wails build",
     "wails:generate": "wails generate module",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint . --ext .ts,.tsx"
+    "lint": "eslint . --ext .ts,.tsx",
+    "test:tabs": "node --experimental-strip-types --test src/components/tabs/paneTree.test.ts",
+    "test:preview": "node --experimental-strip-types --test src/components/sftp/preview.test.ts"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

@@ -8,8 +8,6 @@ import { useEffect } from "react";
 import { MainLayout } from "@components/layout/MainLayout";
 import { CommandPalette } from "@components/palette/CommandPalette";
 import { TrustRequestModal } from "@components/knownhosts/TrustRequestModal";
-import { SftpBrowser } from "@components/sftp/SftpBrowser";
-import { useSftpBrowserStore } from "@components/sftp/sftpBrowserStore";
 import { ProfileEditModal } from "@components/session/ProfileEditModal";
 import { ConfirmDeleteProfile } from "@components/session/ConfirmDeleteProfile";
 import { useAppStore } from "@stores/appStore";
@@ -19,11 +17,6 @@ export default function App(): JSX.Element {
   // 应用启动时拉取一次后端状态
   const initApp = useAppStore((s) => s.init);
   const paletteOpen = useUIStore((s) => s.commandPaletteOpen);
-
-  // v0.5.1：SFTP 浏览器开关（受 sftpBrowserStore 全局控制）
-  const sftpOpen   = useSftpBrowserStore((s) => s.isOpen);
-  const sftpSid    = useSftpBrowserStore((s) => s.sessionID);
-  const sftpClose  = useSftpBrowserStore((s) => s.close);
 
   useEffect(() => {
     void initApp();
@@ -46,15 +39,14 @@ export default function App(): JSX.Element {
       <TrustRequestModal />
 
       {/*
-       * v0.5.1 SFTP 浏览器：受 sftpBrowserStore 控制；
-       * open / sessionID / onClose 三件套都从 store 拿。
-       * 挂在 App 顶层（不在 MainLayout 里），与其他 modal 同级。
+       * v0.5.8 SFTP 集成到 Pane 树：SFTP 浏览器不再以独立 modal 形式
+       * 弹在 App 顶层 —— 改为 `tabsStore.addSftpPane` 在当前 active tab
+       * 内追加 SFTP leaf（与 SSH terminal 并列）。
+       *
+       * 旧 SftpBrowser modal 包装仍 export 保留（@components/sftp/SftpBrowser）
+       * —— 未来 v0.6+ "SFTP 预览" / "命令面板调起独立面板" 仍可挂载，
+       * 但 v0.5.8 默认不在 App.tsx 挂。
        */}
-      <SftpBrowser
-        open={sftpOpen}
-        sessionID={sftpSid}
-        onClose={sftpClose}
-      />
 
       {/*
        * v0.5.6 Profile 编辑 modal（包 SessionForm）+ 删除确认 modal。

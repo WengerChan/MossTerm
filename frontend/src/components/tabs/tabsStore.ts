@@ -1,18 +1,24 @@
 /**
  * Tabs + Split-Pane 状态
  * --------------------------------------------------------------------
- * v0.5.0 B 引入。每个 Tab 持有一棵 Pane 树：
+ * v0.5.0 B 引入。每个 Tab 持有一棵 Pane 树；v0.5.8 扩展 Pane 类型支持
+ * SFTP leaf。
  *
  *   Tab.panes: Pane[]                ─ 顶级 root（一般 1 个；保留数组为后续 detached pane 留口）
- *     └─ Pane: { split: null, ... }  ─ leaf，挂载 Terminal
- *     └─ Pane: { split: 'h' | 'v', children: [Pane, Pane] } ─ split 节点
+ *     └─ Pane: { kind: 'terminal' | 'sftp', split: null, ... }  ─ leaf，挂载 Terminal / SftpPaneView
+ *     └─ Pane: { kind: 'split', split: 'h' | 'v', children: [Pane, Pane] } ─ split 节点
  *
  * 设计要点：
  *   - split 节点固定 2 个 child（size 50/50；v0.5 不做拖拽改 size）
  *   - 关闭一个 leaf：其父 split 自动 collapse 为剩余的 child
  *   - 关闭一个 split 节点：lift 它的 children 到上一层
  *   - 关闭 tab 内最后一个 leaf：整个 tab 被关闭
- *   - pane id 用 crypto.randomUUID() 生成；split 后子节点重新生成
+ *   - pane id 用 crypto.randomUUID() 生成
+ *   - **v0.5.8**：leaf 用 `kind` 区分 terminal / sftp；split 节点
+ *     `kind = 'split'`。`split === null` 也保留为"非 split 节点"判定。
+ *
+ * 算法层（paneTree.ts）已抽离为 pure module，本文件只剩 zustand wrapper
+ * + ID 生成。store actions 调 paneTree.ts 即可。
  *
  * 与 SessionStore（connectionStore）的关系：
  *   - tabsStore 管 UI 树（layout/state）
@@ -23,16 +29,41 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import type { SessionID, ProfileID } from "@/types/session";
+import {
+  addPaneToRoot,
+  closePaneFromTree,
+  createLeaf,
+  findFirstLeafId,
+  splitPaneAt,
+  treeHasLeafOfKind,
+} from "./paneTree";
 
 // =====================================================================
 // Pane 树类型
 // =====================================================================
 export type PaneSplitDirection = "horizontal" | "vertical";
 
+/**
+ * v0.5.8 扩展 Pane 类型：
+ *   - `kind: 'split'` → split 节点，children.length === 2
+ *   - `kind: 'terminal' | 'sftp'` → leaf，挂载对应 view
+ *
+ * 判 leaf 用 `pane.kind !== 'split'`（不再用 `split === null`），
+ * 保持类型上的显式声明。
+ */
+export type PaneKind = "terminal" | "sftp" | "split";
+
 export interface Pane {
   id: string;
   /**
-   * split 方向；null = leaf（挂载 Terminal）。
+   * pane 类型：
+   *   - 'split' = 容器节点
+   *   - 'terminal' = SSH terminal leaf
+   *   - 'sftp' = SFTP browser leaf（v0.5.8 引入）
+   */
+  kind: PaneKind;
+  /**
+   * split 方向；null = leaf（'terminal' / 'sftp'）。
    * leaf 时 sessionId 才有意义；split 节点的 sessionId 始终为 null。
    */
   split: PaneSplitDirection | null;
@@ -65,7 +96,7 @@ export interface Tab {
   profileId: ProfileID | null;
   host: string;
   state: TabState;
-  /** pane 树根列表（v0.5 固定 length=1） */
+  /** pane 树根列表（v0.5 固定 length=1；v0.5.8 多 root 用于 SFTP 并列） */
   panes: Pane[];
   /** 当前激活的 leaf pane */
   activePaneId: string;
@@ -80,7 +111,7 @@ interface TabsState {
 
   // ===== Tab actions =====
   /**
-   * 新建一个 tab，自动创建一个空 leaf pane。
+   * 新建一个 tab，自动创建一个空 terminal leaf pane。
    * 返回新 tab id（方便 caller 立即设为 active / 关联 profile）。
    */
   addTab: (tab: Omit<Tab, "id" | "panes" | "activePaneId">) => string;
@@ -106,123 +137,53 @@ interface TabsState {
    */
   closePane: (tabId: string, paneId: string) => void;
   setActivePane: (tabId: string, paneId: string) => void;
-}
-
-// =====================================================================
-// helpers
-// =====================================================================
-const newPaneId = (): string => crypto.randomUUID();
-
-/**
- * 在 panes 树中把 targetId 对应的 leaf 转成 split 节点。
- * 第一个 child 继承原 sessionId；第二个 child sessionId 为 null。
- */
-function splitPaneInTree(
-  panes: Pane[],
-  targetId: string,
-  direction: PaneSplitDirection,
-): Pane[] {
-  return panes.map((p) => {
-    if (p.id === targetId) {
-      // 已为 split 节点：no-op（split 不可再 split）
-      if (p.split !== null) return p;
-      return {
-        id: p.id, // split 节点复用 leaf id；新的两个 child 重新分配
-        split: direction,
-        children: [
-          {
-            id: newPaneId(),
-            split: null,
-            children: [],
-            size: 50,
-            sessionId: p.sessionId,
-          },
-          {
-            id: newPaneId(),
-            split: null,
-            children: [],
-            size: 50,
-            sessionId: null,
-          },
-        ],
-        size: 100,
-        sessionId: null,
-      };
-    }
-    if (p.split !== null) {
-      return { ...p, children: splitPaneInTree(p.children, targetId, direction) };
-    }
-    return p;
-  });
-}
-
-/**
- * 关闭一个 pane 并保持树形约束：
- *   - target 是 root 且是唯一 leaf → return null（外部关闭整个 tab）
- *   - target 是 leaf 且其父 split 剩 1 个 child → 父 split collapse 为该 child
- *   - target 是 split 节点 → lift children 到上一层
- *   - 任何清空后的 split 节点被丢弃
- */
-function closePaneInTree(panes: Pane[], targetId: string): Pane[] | null {
-  // 特殊：tab 唯一根 pane 即 target → 整个 tab 关闭
-  if (panes.length === 1 && panes[0]!.id === targetId) {
-    return null;
-  }
-
-  const result: Pane[] = [];
-  for (const p of panes) {
-    if (p.id === targetId) {
-      // 命中 target
-      if (p.split !== null) {
-        // split 节点：把 children lift 到上一层
-        for (const child of p.children) {
-          result.push(child);
-        }
-      }
-      // leaf：直接丢弃（result 不 push）
-      continue;
-    }
-    if (p.split !== null) {
-      const sub = closePaneInTree(p.children, targetId);
-      if (sub === null) {
-        // 向上冒泡：通知调用方关闭整个 tab
-        return null;
-      }
-      if (sub.length === 0) {
-        // children 全空 → 丢弃这个 split 节点
-        continue;
-      }
-      if (sub.length === 1) {
-        // 父 split 剩 1 个 child → collapse（避免悬空 split 节点）
-        result.push(sub[0]!);
-        continue;
-      }
-      result.push({ ...p, children: sub });
-      continue;
-    }
-    result.push(p);
-  }
-  return result;
+  /**
+   * v0.5.8：在 tab 内追加一个新 leaf（用于 addSftpPane / addTerminalPane）。
+   *   - 追加到 rootPanes 末尾（root 已有 split 时 leaf 平铺到 root）
+   *   - 自动激活新 leaf（activePaneId 指向新 leaf）
+   *   - caller 负责传入 leaf.kind + sessionId
+   */
+  addPaneToTab: (tabId: string, leaf: Pane) => void;
+  /**
+   * v0.5.8 便捷 API：在 tab 内追加 SFTP leaf。返回新 pane id（用于 caller
+   * 决定是否 toast / focus）。
+   *
+   *   - 缺省 sessionId：tab 当前 sessionId（tab 创建好 session 后再调用）
+   *   - 缺省 sessionId 且 tab 也没有：传 null（leaf 渲染 EmptyLeafHint）
+   */
+  addSftpPane: (tabId: string, sessionId?: SessionID | null) => string;
+  /**
+   * v0.5.8 便捷 API：在 tab 内追加 terminal leaf。
+   *   - 缺省 sessionId：tab 当前 sessionId
+   *   - 当前 v0.5.8 暂未挂到 TabBar（保持 SplitPane 工具栏是唯一入口），
+   *     留作未来 "克隆当前 terminal 到新 pane" 之类 ops 的接入口
+   */
+  addTerminalPane: (tabId: string, sessionId?: SessionID | null) => string;
+  /**
+   * v0.5.8 内部工具：tab 是否已含 SFTP leaf（用于 TabBar 决定 SFTP 按钮
+   * 文案 = "打开 SFTP 面板" vs "再开一个 SFTP"）。
+   */
+  tabHasSftpLeaf: (tabId: string) => boolean;
 }
 
 // =====================================================================
 // store impl
 // =====================================================================
+const newPaneId = (): string => crypto.randomUUID();
+
 export const useTabsStore = create<TabsState>()(
-  subscribeWithSelector((set) => ({
+  subscribeWithSelector((set, get) => ({
     tabs: [],
     activeTabId: null,
 
     addTab: (tab) => {
       const tabId = newPaneId();
-      const paneId = newPaneId();
+      const leaf = createLeaf("terminal", null);
       const newTab: Tab = {
         ...tab,
         id: tabId,
-        panes: [
-          { id: paneId, split: null, children: [], size: 100, sessionId: null },
-        ],
-        activePaneId: paneId,
+        panes: [leaf],
+        activePaneId: leaf.id,
       };
       set((s) => ({ tabs: [...s.tabs, newTab], activeTabId: tabId }));
       return tabId;
@@ -248,10 +209,7 @@ export const useTabsStore = create<TabsState>()(
       set((s) => ({
         tabs: s.tabs.map((t) => {
           if (t.id !== tabId) return t;
-          return {
-            ...t,
-            panes: splitPaneInTree(t.panes, paneId, direction),
-          };
+          return { ...t, panes: splitPaneAt(t.panes, paneId, direction) };
         }),
       }));
     },
@@ -264,7 +222,7 @@ export const useTabsStore = create<TabsState>()(
             newTabs.push(t);
             continue;
           }
-          const newPanes = closePaneInTree(t.panes, paneId);
+          const newPanes = closePaneFromTree(t.panes, paneId);
           if (newPanes === null) {
             // 整个 tab 关闭：不 push
             continue;
@@ -294,16 +252,45 @@ export const useTabsStore = create<TabsState>()(
           t.id === tabId ? { ...t, activePaneId: paneId } : t,
         ),
       })),
+
+    addPaneToTab: (tabId, leaf) => {
+      set((s) => ({
+        tabs: s.tabs.map((t) => {
+          if (t.id !== tabId) return t;
+          return {
+            ...t,
+            panes: addPaneToRoot(t.panes, leaf),
+            activePaneId: leaf.id, // 自动激活新 leaf
+          };
+        }),
+      }));
+    },
+
+    addSftpPane: (tabId, sessionId) => {
+      const t: Tab | undefined = get().tabs.find((x) => x.id === tabId);
+      // sessionId 缺省 → 用 tab 自身的 sessionId（如果 tab 已有）
+      const sid = sessionId === undefined ? t?.sessionId ?? null : sessionId;
+      const leaf = createLeaf("sftp", sid);
+      get().addPaneToTab(tabId, leaf);
+      return leaf.id;
+    },
+
+    addTerminalPane: (tabId, sessionId) => {
+      const t: Tab | undefined = get().tabs.find((x) => x.id === tabId);
+      const sid = sessionId === undefined ? t?.sessionId ?? null : sessionId;
+      const leaf = createLeaf("terminal", sid);
+      get().addPaneToTab(tabId, leaf);
+      return leaf.id;
+    },
+
+    tabHasSftpLeaf: (tabId) => {
+      const t = get().tabs.find((x) => x.id === tabId);
+      if (!t) return false;
+      return treeHasLeafOfKind(t.panes, "sftp");
+    },
   })),
 );
 
-/**
- * 在 pane 树中找出第一个 leaf 的 id（深度优先）。
- * 用于 activePane 被关闭后兜底选中。
- */
-function findFirstLeafId(p: Pane): string {
-  if (p.split === null) return p.id;
-  const first = p.children[0];
-  if (!first) return p.id; // 不应发生
-  return findFirstLeafId(first);
-}
+// re-export 给外部
+export { findFirstLeafId, createLeaf } from "./paneTree";
+export { treeHasLeafOfKind, collectLeaves } from "./paneTree";

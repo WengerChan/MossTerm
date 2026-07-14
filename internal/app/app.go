@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sync"
 
 	"golang.org/x/crypto/ssh"
@@ -49,15 +50,16 @@ type EventEmitter interface {
 type App struct {
 	ctx context.Context
 
-	cfg        *config.Manager
-	secret     secret.Store
-	sessions   session.Manager
-	transfers  transfer.Engine
-	tunnels    tunnel.Manager
-	agents     agent.Registry
-	plugins    plugin.Host
-	ai         ai.Client
-	knownHosts *knownhosts.Manager
+	cfg          *config.Manager
+	secret       secret.Store
+	sessions     session.Manager
+	transfers    transfer.Engine
+	uploadMgr    *transfer.Manager // v0.5.10 streaming upload manager
+	tunnels      tunnel.Manager
+	agents       agent.Registry
+	plugins      plugin.Host
+	ai           ai.Client
+	knownHosts   *knownhosts.Manager
 
 	// connectors 是 connect.Connector 的注册表，被 sessions.Manager 共享。
 	// v0.1 默认注册 "ssh" scheme → sshclient.Factory。
@@ -194,7 +196,55 @@ func New(deps Deps) *App {
 		return sftpclient.Open(c)
 	}
 
+	// v0.5.10 streaming upload manager。
+	// factory 内部用 a.SftpClient(sid) 拿 *sftpclient.Client，包装成 transfer.Uploader。
+	// 这条路径在 sftpClient 还没建好时（OnStartup 之前）调用会失败：
+	// wailsbinding 在用户上传时才会调，那时 sftpClient 已建好。
+	//
+	// 单独存一份 *transfer.Manager 不走 transfer.Engine 接口（Engine 是
+	// v0.1 占位通用队列），v0.5.10 的 streaming upload 是 focused manager。
+	// TransferDir 用 config 目录的 transfers/ 子目录（与 config.toml 同根）。
+	manifestDir := transferDirFromConfigPath(deps.Cfg)
+	a.uploadMgr = transfer.NewManager(manifestDir, a.makeUploadFactory(), deps.Emitter, deps.Log)
+	if a.uploadMgr == nil {
+		// NewManager 不会返回 nil（nil-safe log 兜底）；这里防御
+		deps.Log.Error("app.New: transfer.NewManager returned nil")
+	}
+
 	return a
+}
+
+// makeUploadFactory 返回 wailsbinding 用的 UploaderFactory。
+//
+// 内部逻辑：sessID → a.sftpFor(sessID) → 包装成 transfer.Uploader。
+// sftpFor 已经做了 lazy-init + session 状态检查 + nil-safe。
+func (a *App) makeUploadFactory() transfer.UploaderFactory {
+	return func(sid session.ID) (transfer.Uploader, error) {
+		c, err := a.SftpClient(sid)
+		if err != nil {
+			return nil, fmt.Errorf("app.makeUploadFactory: %w", err)
+		}
+		return &sftpUploader{Client: c}, nil
+	}
+}
+
+// transferDirFromConfigPath 从 config 路径推出 transfers/ 子目录。
+//
+// v0.5.10 行为：与 config.toml 同根目录下的 transfers/ 子目录。
+// 拿不到 config 路径时退到 transfer.DefaultManifestDir()。
+func transferDirFromConfigPath(cfg *config.Manager) string {
+	if cfg == nil {
+		return transfer.DefaultManifestDir()
+	}
+	cfgPath := cfg.Path()
+	if cfgPath == "" {
+		return transfer.DefaultManifestDir()
+	}
+	dir := filepath.Dir(cfgPath)
+	if dir == "" || dir == "." {
+		return transfer.DefaultManifestDir()
+	}
+	return filepath.Join(dir, "transfers")
 }
 
 // OnStartup 是 Wails 生命周期钩子（webview 启动时调用一次）。
@@ -294,6 +344,14 @@ func (a *App) KnownHosts() *knownhosts.Manager { return a.knownHosts }
 
 // Log 返回结构化 logger。
 func (a *App) Log() *slog.Logger { return a.log }
+
+// UploadManager 返回 v0.5.10 streaming upload manager。
+//
+// 供 wailsbindings.StartUpload/CancelUpload/ListTransfers/GetTransfer 使用。
+// 单例（app.New 时构造一次），与 App 同寿命。
+func (a *App) UploadManager() *transfer.Manager {
+	return a.uploadMgr
+}
 
 // -----------------------------------------------------------------------------
 // SFTP 客户端生命周期（v0.5.1+）

@@ -22,6 +22,7 @@ import (
 	"github.com/mossterm/mossterm/internal/secret"
 	"github.com/mossterm/mossterm/internal/session"
 	"github.com/mossterm/mossterm/internal/sftpclient"
+	"github.com/mossterm/mossterm/internal/transfer"
 )
 
 // App 是 Wails 绑定入口。
@@ -416,4 +417,212 @@ func (a *App) SftpUploadFile(ctx context.Context, sessionID, remotePath string, 
 		return n, fmt.Errorf("wailsbindings.SftpUploadFile: %w", err)
 	}
 	return n, nil
+}
+
+// -----------------------------------------------------------------------------
+// SFTP 文件预览（v0.5.9）
+// -----------------------------------------------------------------------------
+//
+// 设计概要：
+//   - 三个 binding 覆盖 preview 全流程：SftpReadFileChunk（读字节）+ SftpStatFile
+//     （轻量元信息）+ SftpGetFileMetadata（full classify）
+//   - 与既有 SftpStat / SftpRead 互补：
+//     - SftpStat：仅 Entry（spec 不变，v0.5.1 行为）
+//     - SftpRead：1 MiB 截断，限定小文件
+//     - SftpReadFileChunk：任意 offset+size，受 sftpclient.PreviewMaxBytes 硬上限
+//   - 大文件保护：前端走 PreviewPanel 必须先 SftpGetFileMetadata，看到
+//     "toolarge" 就不要走 ReadFileChunk —— 后端再 belt-and-suspenders 截断。
+//   - 不引新依赖：mime 走 net/http.DetectContentType，magic 走 sftpclient.DetectMagic。
+//
+// Wails 反射契约同 SFTP 组其它方法：ctx 必须第一参、[]byte → Uint8Array、
+// error 被前端 .catch() 捕获、struct 公开字段才被序列化。
+
+// SftpReadFileChunk 读远端 path 的 [offset, offset+size) 字节。
+//
+// 调用栈（v0.5.9）：
+//  1. 前端 PreviewPanel 在 image / pdf / text 分支按需读字节
+//  2. App.SftpReadFileChunk(sessionID, path, offset, size)
+//  3. sftpclient.Client.ReadFileChunk
+//
+// 参数约定：
+//   - sessionID：已 Open 且 Established 的 session
+//   - path：远端绝对路径
+//   - offset：< 0 视作 0；>= fileSize 返回空 slice
+//   - size：> 0 精确 size 字节（截到 sftpclient.PreviewMaxBytes=50 MiB）；
+//     <= 0 读到 EOF（截到 PreviewMaxBytes 防御）
+//
+// 错误：SftpList 同款 + sftpclient.ReadFileChunk 内部错误（远端权限 /
+// 文件不存在 / 远端 IO）→ fmt.Errorf("wailsbindings.SftpReadFileChunk: %w", err)。
+//
+// 与 SftpRead 的区别：
+//   - SftpRead：1 MiB hard cap，offset 恒为 0
+//   - SftpReadFileChunk：50 MiB cap，offset 任意，size 任意 → 通用 read
+func (a *App) SftpReadFileChunk(ctx context.Context, sessionID, path string, offset, size int64) ([]byte, error) {
+	client, err := a.core.SftpClient(session.ID(sessionID))
+	if err != nil {
+		return nil, fmt.Errorf("wailsbindings.SftpReadFileChunk: %w", err)
+	}
+	data, err := client.ReadFileChunk(path, offset, size)
+	if err != nil {
+		return nil, fmt.Errorf("wailsbindings.SftpReadFileChunk: %w", err)
+	}
+	return data, nil
+}
+
+// SftpStatFile 返回远端 path 的轻量元信息（size + mime + name + path + modTime）。
+//
+// 调用栈（v0.5.9）：
+//  1. 前端只需要 mime（比如 tooltip / 排序）→ App.SftpStatFile
+//  2. wailsbinding 调 sftpclient.Client.BuildPreviewMetadataLite
+//  3. 返回 PreviewMetadata（Kind / IsImage 等分类字段留空）
+//
+// 与 SftpGetFileMetadata 的区别：
+//   - SftpStatFile：不做 magic detection + classify，省一次 ClassifyPreview 调用
+//   - SftpGetFileMetadata：full magic + classify，返回 Kind 字段
+//
+// 实际差异只在返回字段上 —— 后端实现共享 Client.buildPreviewMetadataImpl 内部
+// helper。两者都做"读前 512 字节"（mime 需要）；分类开关决定是否走 ClassifyPreview。
+//
+// 错误：SftpList 同款 + sftpclient.BuildPreviewMetadataLite 内部错误。
+func (a *App) SftpStatFile(ctx context.Context, sessionID, path string) (sftpclient.PreviewMetadata, error) {
+	client, err := a.core.SftpClient(session.ID(sessionID))
+	if err != nil {
+		return sftpclient.PreviewMetadata{}, fmt.Errorf("wailsbindings.SftpStatFile: %w", err)
+	}
+	meta, err := client.BuildPreviewMetadataLite(path)
+	if err != nil {
+		return sftpclient.PreviewMetadata{}, fmt.Errorf("wailsbindings.SftpStatFile: %w", err)
+	}
+	return meta, nil
+}
+
+// SftpGetFileMetadata 返回远端 path 的完整预览元信息（含 kind 分类）。
+//
+// 调用栈（v0.5.9）：
+//  1. 前端 PreviewPanel 打开时第一步 → App.SftpGetFileMetadata(sessionID, path)
+//  2. wailsbinding 调 sftpclient.Client.BuildPreviewMetadata
+//  3. 返回 PreviewMetadata（Kind / IsImage / IsPDF / IsText 已填）
+//  4. 前端按 kind 路由到不同分支（image / pdf / text / binary / toolarge）
+//
+// 即使 size > PreviewMaxBytes 也会返回 —— 仍 Stat + 读 16 字节（够小），
+// kind 自动归类为 "toolarge"，前端禁止走 ReadFileChunk。
+//
+// 错误：SftpList 同款 + sftpclient.BuildPreviewMetadata 内部错误。
+func (a *App) SftpGetFileMetadata(ctx context.Context, sessionID, path string) (sftpclient.PreviewMetadata, error) {
+	client, err := a.core.SftpClient(session.ID(sessionID))
+	if err != nil {
+		return sftpclient.PreviewMetadata{}, fmt.Errorf("wailsbindings.SftpGetFileMetadata: %w", err)
+	}
+	meta, err := client.BuildPreviewMetadata(path)
+	if err != nil {
+		return sftpclient.PreviewMetadata{}, fmt.Errorf("wailsbindings.SftpGetFileMetadata: %w", err)
+	}
+	return meta, nil
+}
+
+// -----------------------------------------------------------------------------
+// Streaming Upload（v0.5.10）
+// -----------------------------------------------------------------------------
+//
+// 设计概要：
+//   - 4 个 binding 覆盖 streaming upload 全流程：StartUpload（启动后台
+//     goroutine）/ CancelUpload（context cancel）/ ListTransfers（看全部
+//     active + 已结束）/ GetTransfer（取单个详情，含 manifest 路径）
+//   - 进度通过 Wails runtime EventsEmit 推送 3 个事件：
+//     - "transfer:progress" → transfer.Progress payload
+//     - "transfer:done"     → transfer.JobInfo payload（State=Completed）
+//     - "transfer:error"    → transfer.JobInfo payload（State=Failed / Canceled）
+//   - 断点续传：transfers/<id>.json manifest 写盘；Resume=true 调 StartUpload
+//     时 Manager 读 manifest + 校验 local mtime/size → 跳过已传 chunk
+//   - sessionID 通过 Wails ctx 注入（transfer.WithSessionID）；
+//     startUpload 不读 req.sessionID 字段（UploadRequest 没这字段，v0.5.10
+//     单一 session → 一次 upload）
+//
+// Wails 反射契约同 SFTP 组其它方法：ctx 必须第一参、error 被前端 .catch()
+// 捕获、struct 公开字段才被序列化。返回的 string 是 transferID（前端用
+// 来订阅事件 + 取消）。
+
+// StartUpload 启动一次 streaming upload（后台 goroutine，非阻塞）。
+//
+// 调用栈（v0.5.10）：
+//  1. 前端 drag-drop 拿到 localPath（file.path 或 file.name + 拼出）
+//  2. App.StartUpload(ctx, req) → wailsbinding
+//  3. 注入 sessionID 到 ctx（req.SessionID → transfer.WithSessionID）
+//  4. 调 transfer.Manager.StartUpload
+//  5. Manager 后台 goroutine 跑 transfer.Upload（分片 + 进度回调）
+//  6. 进度走 emitter.Emit("transfer:progress", p) → 前端 EventsOn 收到
+//  7. 完成 / 失败 / 取消 emit "transfer:done" / "transfer:error"
+//
+// 参数约定：
+//   - req.TransferID：可空（自动生成 UUID-style ID）；非空用于 Resume
+//   - req.SessionID：必传；前端从 active session 拿 → 注入 ctx
+//   - req.LocalPath：本地文件绝对路径；前端拿不到时可用上传函数式 API
+//   - req.RemotePath：远端绝对路径
+//   - req.ChunkSize：0 = DefaultChunkSize (4 MiB)；clamp 到 [1, 16] MiB
+//   - req.Concurrency：0 = DefaultConcurrency (2)；clamp 到 [1, 4]
+//   - req.Resume：true = 接续已有 manifest；false = 忽略旧 manifest 重新传
+//
+// 错误：SftpList 同款 + transfer.Upload 内部错误（mtime/size 变化 /
+// 文件过大 / 网络中断）→ fmt.Errorf("wailsbindings.StartUpload: %w", err)。
+// 错误时前端仍会收到 "transfer:error" 事件（异步），错误内容也通过
+// binding 的 error 返回。
+func (a *App) StartUpload(ctx context.Context, req transfer.UploadRequest) (string, error) {
+	mgr := a.core.UploadManager()
+	if mgr == nil {
+		return "", errors.New("wailsbindings.StartUpload: upload manager not initialized")
+	}
+	if req.SessionID == "" {
+		return "", errors.New("wailsbindings.StartUpload: empty sessionID in request")
+	}
+	// 注入 sessionID 到 ctx
+	ctx = transfer.WithSessionID(ctx, session.ID(req.SessionID))
+	id, err := mgr.StartUpload(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("wailsbindings.StartUpload: %w", err)
+	}
+	return id, nil
+}
+
+// CancelUpload 取消一个 transfer。
+//
+// 立即返回（不等待 goroutine 退出）；前端用 ListTransfers 看 State 转
+// Canceled。前端订阅的 "transfer:error" 事件仍会触发（State=Canceled）。
+//
+// 错误：transferID 不存在 / upload manager 没初始化。
+func (a *App) CancelUpload(ctx context.Context, transferID string) error {
+	mgr := a.core.UploadManager()
+	if mgr == nil {
+		return errors.New("wailsbindings.CancelUpload: upload manager not initialized")
+	}
+	if err := mgr.CancelUpload(transferID); err != nil {
+		return fmt.Errorf("wailsbindings.CancelUpload: %w", err)
+	}
+	return nil
+}
+
+// ListTransfers 返回全部 transfers 的快照（active + 已结束）。
+//
+// 排序：按 StartedAt 倒序（最新在前）。
+// 用途：前端用 polling 兜底（事件丢失场景）；UI 面板展示"全部任务"。
+//
+// 返回的 []transfer.JobInfo 是 manager 内部 map 的快照拷贝，调用方修改
+// 不影响 manager 状态。
+func (a *App) ListTransfers(ctx context.Context) []transfer.JobInfo {
+	mgr := a.core.UploadManager()
+	if mgr == nil {
+		return []transfer.JobInfo{}
+	}
+	return mgr.ListTransfers()
+}
+
+// GetTransfer 按 ID 取一个 transfer 快照。
+//
+// 不存在返回 (zero, false)。前端用 transfer:progress 事件实时更新 + 用
+// GetTransfer 做兜底刷新。
+func (a *App) GetTransfer(ctx context.Context, transferID string) (transfer.JobInfo, bool) {
+	mgr := a.core.UploadManager()
+	if mgr == nil {
+		return transfer.JobInfo{}, false
+	}
+	return mgr.GetTransfer(transferID)
 }

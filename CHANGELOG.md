@@ -15,6 +15,46 @@
 - 基础设施文件：Makefile、CI、配置模板、贡献指南、行为准则
 - GitHub Actions CI 矩阵：ubuntu / macOS / windows × lint / test / build
 
+### v0.5.10 · SFTP streaming upload（分片 + 进度 + 断点续传）
+
+**目标**：把 v0.5.3 的"一次性 readAsArrayBuffer → SftpUploadFile"
+（100 MiB 上限）替换为分片 + 流式 + 进度 + 断点续传，支持 GB 级文件。
+
+**已完成**：
+
+#### 后端
+- `internal/transfer/streaming.go` — 核心分片上传 + Uploader 接口
+  - 默认 4 MiB chunk（1-16 MiB 可配）+ 2 路并发（1-4 可配）
+  - pkg/sftp WriteAt 并发写（不通过 Go 堆缓冲整文件）
+  - 进度 200ms 节流 emit；SHA-256 完成后算
+  - ctx 取消支持；10 GiB 大文件保护
+- `internal/transfer/manifest.go` — 断点续传凭证
+  - `<configDir>/transfers/<id>.json` atomic-rename 持久化
+  - Resume 校验：local mtime + size + path 不一致 → ErrLocalChanged
+- `internal/transfer/manager.go` — Manager（jobs map + Wails 事件）
+  - `transfer:progress` / `transfer:done` / `transfer:error` 三事件
+- `internal/sftpclient/client.go` — ReadWriteCloser 加 io.WriterAt；新增 Truncate / MkdirAll
+- `internal/app/{app,upload_adapter}.go` — wire UploadManager 到 App
+- `internal/ui/wailsbindings/api.go` — 4 个 binding
+  - `StartUpload(ctx, req) → transferID`
+  - `CancelUpload(ctx, transferID)`
+  - `ListTransfers(ctx) → []JobInfo`
+  - `GetTransfer(ctx, transferID) → (JobInfo, bool)`
+- `internal/config/{config,loader}.go` — TransferSettings 段
+  - chunk_size / concurrency / max_file_size（package const 兜底）
+
+#### 前端
+- `frontend/src/stores/transferStore.ts` — zustand store（jobs map + applyProgress）
+- `frontend/src/hooks/useTransferEvents.ts` — 订阅 transfer:* 事件 → store
+- `frontend/src/components/sftp/UploadProgress.tsx` — 进度面板（粘在 content 底部）
+- `frontend/src/components/sftp/SftpBrowserContent.tsx` — drag handler 改走 StartUpload；内嵌 UploadProgress；删 100 MiB 限制
+- `frontend/wailsjs/go/main/App.d.ts` — 4 个 binding stub + UploadRequest/UploadProgress/UploadJobInfo types
+
+#### 测试
+- 单元 19 个：chunk 切分 / manifest 读写 / Resume 校验 / progress 回调 / ctx 取消 / 零字节
+- 集成 5 个：1 MB / 50 MB / 100 MB / 8 MB 并发 / 32 MB Resume —— 全部走 in-process SFTP server
+- 全量 `go test -race` 干净通过
+
 ### v0.1 · 核心 SSH 通路（进行中）
 
 **目标**：能 SSH 进去看东西。

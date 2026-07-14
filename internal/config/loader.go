@@ -193,6 +193,10 @@ func writeTOMLFile(path string, d *Data) error {
 //
 // 注意：Profile.Layouts/Keymaps/Themes 等用空 map 而非 nil，方便
 // 上层 for-range 不需要 nil check。
+//
+// TransferSettings（v0.5.10）零值 → transfer 包用 package const 兜底
+// （DefaultChunkSize 4 MiB / DefaultConcurrency 2 / MaxFileSize 10 GiB）。
+// 用户在 config.toml 显式设值后覆盖。
 func Defaults() *Data {
 	return &Data{
 		Version: 1,
@@ -203,6 +207,7 @@ func Defaults() *Data {
 			KeepAliveSecs: 30,
 			CheckUpdate:   true,
 		},
+		Transfer: TransferSettings{},
 		Profiles: make(map[string]Profile),
 		Layouts:  make(map[string]Layout),
 		Keymaps:  make(map[string]Keymap),

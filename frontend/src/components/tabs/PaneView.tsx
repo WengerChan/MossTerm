@@ -1,9 +1,11 @@
 /**
  * PaneView —— 递归渲染 Pane 树
  * --------------------------------------------------------------------
- * - Pane.split === null → leaf，挂载 <Terminal />（sessionId 必填）
- *   若 sessionId 为 null（空 tab / 刚 split）→ 渲染 EmptyPane 引导用户连会话
- * - Pane.split !== null → split 节点，递归 children 用 <SplitPane>
+ * - Pane.kind === 'split' → 递归 children 用 <SplitPane>
+ * - Pane.kind === 'terminal' → leaf，挂载 <Terminal />（sessionId 必填）
+ *   若 sessionId 为 null（空 tab / 刚 split）→ 渲染 EmptyLeafHint
+ * - Pane.kind === 'sftp' → leaf，挂载 <SftpPaneView />
+ *   v0.5.8 引入：SFTP 浏览器嵌入 Pane 树，与 SSH terminal 并列
  *
  * 交互：
  *   - 点击 leaf → setActivePane（store）+ focus 该 pane 的 xterm
@@ -17,6 +19,7 @@ import { useEffect, useRef } from "react";
 import { Terminal as TerminalIcon, Plus } from "lucide-react";
 import clsx from "clsx";
 import { Terminal } from "../terminal/Terminal";
+import { SftpPaneView } from "@components/sftp/SftpPaneView";
 import { SplitPane } from "./SplitPane";
 import type { Pane, PaneSplitDirection } from "./tabsStore";
 import { useUIStore } from "@stores/uiStore";
@@ -37,10 +40,10 @@ export function PaneView({
   onClose,
 }: PaneViewProps): JSX.Element {
   // ============ split node：递归 ============
-  if (pane.split !== null) {
+  if (pane.kind === "split") {
     return (
       <SplitPane
-        direction={pane.split}
+        direction={pane.split!}
         onSplit={(dir) => onSplit(pane.id, dir)}
         onClose={() => onClose(pane.id)}
       >
@@ -58,7 +61,7 @@ export function PaneView({
     );
   }
 
-  // ============ leaf：Terminal 或占位 ============
+  // ============ leaf：Terminal / SftpPaneView / EmptyLeafHint ============
   return (
     <LeafPane
       pane={pane}
@@ -80,20 +83,28 @@ interface LeafPaneProps {
 function LeafPane({ pane, isActive, onActivate }: LeafPaneProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
-  // 切到当前 leaf 时，把焦点给 xterm 的 hidden textarea
+  // 切到当前 leaf 时，把焦点给目标内容：
+  //   - terminal → xterm 的 hidden textarea
+  //   - sftp    → content 容器本身（无 xterm 概念，content 内部键盘事件
+  //               在 viewer/dialog 时被 useEffect 监听，pane 切换时
+  //               触发本 useEffect 即可让当前 pane 接收 focus）
   useEffect(() => {
     if (!isActive) return;
     const root = containerRef.current;
     if (!root) return;
     // 等一帧，确保 Terminal 内的 xterm DOM 已就绪
     const id = requestAnimationFrame(() => {
-      const ta = root.querySelector<HTMLTextAreaElement>(
-        ".xterm-helper-textarea",
-      );
-      ta?.focus();
+      if (pane.kind === "terminal") {
+        const ta = root.querySelector<HTMLTextAreaElement>(
+          ".xterm-helper-textarea",
+        );
+        ta?.focus();
+      } else if (pane.kind === "sftp") {
+        root.focus();
+      }
     });
     return () => cancelAnimationFrame(id);
-  }, [isActive, pane.sessionId]);
+  }, [isActive, pane.sessionId, pane.kind]);
 
   return (
     <div
@@ -104,13 +115,23 @@ function LeafPane({ pane, isActive, onActivate }: LeafPaneProps): JSX.Element {
         isActive ? "ring-1 ring-accent" : "ring-1 ring-transparent",
       )}
       data-pane-id={pane.id}
+      data-pane-kind={pane.kind}
       data-active={isActive ? "true" : "false"}
     >
-      {pane.sessionId !== null ? (
-        <Terminal sessionId={pane.sessionId} />
-      ) : (
-        <EmptyLeafHint />
-      )}
+      {pane.kind === "sftp" ? (
+        <SftpPaneView
+          paneId={pane.id}
+          sessionId={pane.sessionId}
+          isActive={isActive}
+          onActivate={onActivate}
+        />
+      ) : pane.kind === "terminal" ? (
+        pane.sessionId !== null ? (
+          <Terminal sessionId={pane.sessionId} />
+        ) : (
+          <EmptyLeafHint />
+        )
+      ) : null}
     </div>
   );
 }

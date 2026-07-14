@@ -15,16 +15,19 @@ import (
 type Direction int
 
 const (
-	// Upload 是本地 → 远端。
-	Upload Direction = iota
-	// Download 是远端 → 本地。
-	Download
+	// DirectionUpload 是本地 → 远端。
+	DirectionUpload Direction = iota
+	// DirectionDownload 是远端 → 本地。
+	DirectionDownload
 )
 
 // JobID 是传输任务的唯一标识。
 type JobID string
 
 // JobState 是传输任务的运行时状态。
+//
+// 数值与 v0.5.10 引入的 streaming upload Manager 共享（StateRunning
+// / StateCompleted / StateFailed / StateCanceled 互通）。
 type JobState int
 
 const (
@@ -76,10 +79,13 @@ type Options struct {
 }
 
 // Progress 是订阅者收到的事件。
-type Progress struct {
-	JobID       JobID       `json:"jobId"`
-	Transferred int64       `json:"transferred"`
-	Speed       int64       `json:"speed"`
+//
+// v0.5.10 重命名为 EngineProgress（避开 streaming upload 的 Progress 类型）。
+// 字段含义：v0.1 占位，未实际 emit；订阅 API 也不实现。
+type EngineProgress struct {
+	JobID       JobID         `json:"jobId"`
+	Transferred int64         `json:"transferred"`
+	Speed       int64         `json:"speed"`
 	Eta         time.Duration `json:"eta"`
 }
 
@@ -97,7 +103,7 @@ type Engine interface {
 	Resume(id JobID) error
 	Cancel(id JobID) error
 	// Subscribe 订阅 Progress 事件。
-	Subscribe() (<-chan Progress, func())
+	Subscribe() (<-chan EngineProgress, func())
 }
 
 // MemoryEngine 是 Engine 的进程内实现。
@@ -144,7 +150,7 @@ func (e *MemoryEngine) Cancel(id JobID) error {
 }
 
 // Subscribe 实现 Engine.Subscribe。
-func (e *MemoryEngine) Subscribe() (<-chan Progress, func()) {
+func (e *MemoryEngine) Subscribe() (<-chan EngineProgress, func()) {
 	panic("transfer.MemoryEngine.Subscribe: not implemented")
 }
 
