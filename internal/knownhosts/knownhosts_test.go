@@ -902,7 +902,14 @@ func TestHostKeyCallback_TrustRequest_TrustFlow(t *testing.T) {
 	if !strings.Contains(string(data), "newhost.com") {
 		t.Errorf("file content missing 'newhost.com': %q", string(data))
 	}
-	// 3) 第二次连接应当走"已知 + 匹配"路径，不再触发 trust
+	// 3) v0.5.2 验证：trustWaiters map 在 callback 返回后被清空（无泄露）
+	m.trustMu.Lock()
+	leaked := len(m.trustWaiters)
+	m.trustMu.Unlock()
+	if leaked != 0 {
+		t.Errorf("trustWaiters leaked %d entries after trust, want 0", leaked)
+	}
+	// 4) 第二次连接应当走"已知 + 匹配"路径，不再触发 trust
 	emitter2 := newMockEmitter(1)
 	m2, err := NewWithTrust(filepath.Join(dir, "kh"), emitter2)
 	if err != nil {
@@ -1030,40 +1037,227 @@ func TestHostKeyCallback_TrustRequest_Timeout(t *testing.T) {
 	if m.Size() != 0 {
 		t.Errorf("Size = %d, want 0 (timed-out should not add entry)", m.Size())
 	}
+	// v0.5.2 验证：trustWaiters map 在 timeout 路径也被清空（defer 删除生效）
+	m.trustMu.Lock()
+	leaked := len(m.trustWaiters)
+	m.trustMu.Unlock()
+	if leaked != 0 {
+		t.Errorf("trustWaiters leaked %d entries after timeout, want 0", leaked)
+	}
 }
 
 func TestHostKeyCallback_TrustRequest_IDMismatch(t *testing.T) {
-	// ReplyTrust 用了错误的 ID → HostKeyCallback 返回 ID mismatch error
+	// v0.5.2 删除：旧的"单 channel + ID mismatch"是 v0.5.0 的设计缺陷
+	// —— replyCh 容量 1 时多个并发连接共享一条 channel，第一个 callback
+	// 拿到"别人的 reply"时 ID 必然不匹配。
+	//
+	// v0.5.2 per-request channel 模式下 replyCh 一一对应，select 拿到的
+	// reply.ID 必然等于 req.ID，ID mismatch 不可能发生。相关测试场景
+	// 改为 "ReplyTrust 用错 ID → 立即 error"（见 TestReplyTrust_UnknownID_ReturnsError）。
+	t.Skip("v0.5.2 removed: ID mismatch impossible under per-request channel design; see TestReplyTrust_UnknownID_ReturnsError")
+}
+
+func TestHostKeyCallback_ConcurrentTrustRequests(t *testing.T) {
+	// v0.5.2 并发 trust 场景的核心测试：
+	// 5 个 goroutine 同时触发 5 个不同 host 的 HostKeyCallback，验证：
+	//   1) 5 个都收到 emit
+	//   2) 5 个 ID 唯一
+	//   3) 用各自 ID 调 ReplyTrust，对应 goroutine 都能拿到正确 reply
+	//   4) trust 全部成功（5 个 entry 全部写入文件）
+	//
+	// 旧版 trustReplyCh 容量 1 时这个测试会失败：第二个 callback 起 timeout。
+	const N = 5
 	dir := t.TempDir()
-	emitter := newMockEmitter(1)
+	emitter := newMockEmitter(N)
 	m, err := NewWithTrust(filepath.Join(dir, "kh"), emitter)
 	if err != nil {
 		t.Fatalf("NewWithTrust: %v", err)
 	}
-	signer := generateTestKey(t)
-	cb := m.HostKeyCallback()
 
-	responderDone := make(chan struct{})
-	go func() {
-		defer close(responderDone)
-		call := emitter.waitForCall(t, 2*time.Second)
-		// 故意发错 ID
-		if err := m.ReplyTrust("WRONG-ID-"+call.Req.ID, "trust"); err != nil {
-			t.Errorf("ReplyTrust: %v", err)
+	hosts := make([]string, N)
+	signers := make([]ssh.Signer, N)
+	for i := 0; i < N; i++ {
+		hosts[i] = fmt.Sprintf("host%d.example.com", i)
+		signers[i] = generateTestKey(t)
+	}
+
+	// 收集 callback 错误
+	type cbResult struct {
+		host string
+		err  error
+	}
+	results := make(chan cbResult, N)
+
+	// 启动 N 个 callback goroutine
+	for i := 0; i < N; i++ {
+		go func(i int) {
+			cb := m.HostKeyCallback()
+			err := cb(hosts[i], &net.TCPAddr{Port: 22}, signers[i].PublicKey())
+			results <- cbResult{host: hosts[i], err: err}
+		}(i)
+	}
+
+	// 启动 N 个 responder goroutine：每个等一个 emit，拿到 ID 后用 trust 回复
+	var responderWG sync.WaitGroup
+	for i := 0; i < N; i++ {
+		responderWG.Add(1)
+		go func() {
+			defer responderWG.Done()
+			call := emitter.waitForCall(t, 5*time.Second)
+			// 用拿到的 ID 调 ReplyTrust（必须是正确的 ID）
+			if err := m.ReplyTrust(call.Req.ID, "trust"); err != nil {
+				t.Errorf("ReplyTrust(%q): %v", call.Req.ID, err)
+			}
+		}()
+	}
+	responderWG.Wait()
+
+	// 收集所有 callback 结果
+	for i := 0; i < N; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Errorf("host %q: callback err = %v, want nil", r.host, r.err)
 		}
-	}()
-
-	err = cb("newhost.com", &net.TCPAddr{}, signer.PublicKey())
-	<-responderDone
-
-	if err == nil {
-		t.Fatal("callback should return ID mismatch error")
 	}
-	if !strings.Contains(err.Error(), "ID mismatch") {
-		t.Errorf("err = %v, want 'ID mismatch' in message", err)
+
+	// 1) 5 个 emit 全部被消费（mockEmitter.waitForCall 是 FIFO 弹出）
+	if got := len(emitter.calls); got != 0 {
+		t.Errorf("emitter.calls remaining = %d, want 0 (all consumed by responders)", got)
 	}
-	if m.Size() != 0 {
-		t.Errorf("Size = %d, want 0 (ID mismatch should not add entry)", m.Size())
+
+	// 2) 验证 ID 唯一 + 全部成功
+	//    通过文件内容间接验证 5 个 host 都写入
+	data, err := os.ReadFile(filepath.Join(dir, "kh"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	content := string(data)
+	for i, h := range hosts {
+		if !strings.Contains(content, h) {
+			t.Errorf("file missing host[%d] = %q: %q", i, h, content)
+		}
+	}
+	// 3) Size 应该 = N（5 个 entry 全部 Add 成功）
+	if m.Size() != N {
+		t.Errorf("Size = %d, want %d (all N trusts should add entry)", m.Size(), N)
+	}
+	// 4) trustWaiters map 在所有 callback 退出后应为空（无泄露）
+	m.trustMu.Lock()
+	leaked := len(m.trustWaiters)
+	m.trustMu.Unlock()
+	if leaked != 0 {
+		t.Errorf("trustWaiters leaked %d entries after all callbacks, want 0", leaked)
+	}
+	// 5) 文件应有 N 行
+	lineCount := strings.Count(strings.TrimSpace(content), "\n") + 1
+	if lineCount != N {
+		t.Errorf("file line count = %d, want %d", lineCount, N)
+	}
+}
+
+func TestHostKeyCallback_ConcurrentTrustRequests_MixedActions(t *testing.T) {
+	// v0.5.2 进阶：5 个并发 trust 决策混合（trust / reject），
+	// 验证互不干扰：trust 的进 known_hosts，reject 的不进。
+	//
+	// 这测试并发场景下 per-request channel 的隔离性：reject 不会"污染"trust
+	// 的 reply。
+	//
+	// 关键点：responder goroutine 的 i 不一定对应 callback goroutine 的 i
+	// （emit 顺序不保证），所以 responder 必须根据**捕获的 host** 决定 action，
+	// 而不是根据 goroutine i。这样无论哪个 callback 先 emit，决策都正确。
+	const N = 5
+	dir := t.TempDir()
+	emitter := newMockEmitter(N)
+	m, err := NewWithTrust(filepath.Join(dir, "kh"), emitter)
+	if err != nil {
+		t.Fatalf("NewWithTrust: %v", err)
+	}
+
+	hosts := make([]string, N)
+	signers := make([]ssh.Signer, N)
+	for i := 0; i < N; i++ {
+		hosts[i] = fmt.Sprintf("mixed%d.example.com", i)
+		signers[i] = generateTestKey(t)
+	}
+
+	// 决策：偶数 index → trust，奇数 index → reject
+	wantTrusted := map[int]bool{0: true, 1: false, 2: true, 3: false, 4: true}
+
+	type cbResult struct {
+		idx int
+		host string
+		err  error
+	}
+	results := make(chan cbResult, N)
+
+	// 启动 N 个 callback goroutine
+	for i := 0; i < N; i++ {
+		go func(i int) {
+			cb := m.HostKeyCallback()
+			err := cb(hosts[i], &net.TCPAddr{Port: 22}, signers[i].PublicKey())
+			results <- cbResult{idx: i, host: hosts[i], err: err}
+		}(i)
+	}
+
+	// 启动 N 个 responder：每个根据**捕获的 host name** 决定 action
+	var responderWG sync.WaitGroup
+	responderWG.Add(N)
+	for k := 0; k < N; k++ {
+		go func() {
+			defer responderWG.Done()
+			call := emitter.waitForCall(t, 5*time.Second)
+			// 从 host 名解析 index（host 形如 "mixed3.example.com"）
+			var idx int
+			if _, scanErr := fmt.Sscanf(call.Req.Host, "mixed%d.example.com", &idx); scanErr != nil {
+				t.Errorf("responder: cannot parse host %q: %v", call.Req.Host, scanErr)
+				return
+			}
+			action := "reject"
+			if wantTrusted[idx] {
+				action = "trust"
+			}
+			if err := m.ReplyTrust(call.Req.ID, action); err != nil {
+				t.Errorf("ReplyTrust[%d](%q, action=%s): %v", idx, call.Req.ID, action, err)
+			}
+		}()
+	}
+	responderWG.Wait()
+
+	// 收集 callback 结果
+	for i := 0; i < N; i++ {
+		r := <-results
+		if wantTrusted[r.idx] {
+			// trust 路径：err 应为 nil
+			if r.err != nil {
+				t.Errorf("host %q (index %d, expect trust): err = %v, want nil", r.host, r.idx, r.err)
+			}
+		} else {
+			// reject 路径：err 应包含 "rejected"
+			if r.err == nil {
+				t.Errorf("host %q (index %d, expect reject): err = nil, want rejected", r.host, r.idx)
+			} else if !strings.Contains(r.err.Error(), "rejected") {
+				t.Errorf("host %q (index %d, expect reject): err = %v, want 'rejected' in message", r.host, r.idx, r.err)
+			}
+		}
+	}
+
+	// 验证文件里只有 trust 的 host
+	data, err := os.ReadFile(filepath.Join(dir, "kh"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	content := string(data)
+	for i, h := range hosts {
+		shouldHave := wantTrusted[i]
+		has := strings.Contains(content, h)
+		if has != shouldHave {
+			t.Errorf("host %q (index %d, wantTrusted=%v): file contains = %v, want %v; file: %q",
+				h, i, shouldHave, has, shouldHave, content)
+		}
+	}
+	// Size 应 = trust 数 = 3
+	if m.Size() != 3 {
+		t.Errorf("Size = %d, want 3 (3 trust out of 5)", m.Size())
 	}
 }
 
@@ -1072,7 +1266,11 @@ func TestHostKeyCallback_TrustRequest_IDMismatch(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 func TestReplyTrust_NoPendingRequest_ReturnsError(t *testing.T) {
-	// 没有挂起的 HostKeyCallback 时调 ReplyTrust → 应在 5s 内返回 error
+	// v0.5.2 起：没有挂起的 HostKeyCallback 时调 ReplyTrust → 立即返回 error
+	// （旧版 replyCh 容量 1 让 send 默默成功；新版用 map 查找，未命中立即 error）
+	//
+	// 这个测试原本在 v0.5.0 名字叫 _ReturnsError 但实际断言不返回 error
+	// （旧版 send 默默成功）。v0.5.2 起名字终于和语义对齐。
 	dir := t.TempDir()
 	emitter := newMockEmitter(1)
 	m, err := NewWithTrust(filepath.Join(dir, "kh"), emitter)
@@ -1080,24 +1278,95 @@ func TestReplyTrust_NoPendingRequest_ReturnsError(t *testing.T) {
 		t.Fatalf("NewWithTrust: %v", err)
 	}
 
-	// ReplyTrust 在无 pending 时：replyCh 容量 1 → send 立即成功
-	// （即使没人在 receive，buffered channel 也能 send）
-	// 实际语义：写入成功，Manager 内部 trustReplyCh 持有这条 reply；
-	// 后续 HostKeyCallback 收到时 ID 必然不匹配 → 走 ID mismatch 错误路径。
+	start := time.Now()
+	err = m.ReplyTrust("any-id", "trust")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("ReplyTrust (no pending) should return error, got nil")
+	}
+	if !strings.Contains(err.Error(), "no pending request") {
+		t.Errorf("err = %v, want 'no pending request' in message", err)
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("elapsed = %s, want < 100ms (should not block 5s)", elapsed)
+	}
+	// trustWaiters map 仍应为空（这个 ID 根本不在 map 里）
+	m.trustMu.Lock()
+	waiters := len(m.trustWaiters)
+	m.trustMu.Unlock()
+	if waiters != 0 {
+		t.Errorf("trustWaiters size = %d, want 0", waiters)
+	}
+}
+
+func TestReplyTrust_UnknownID_ReturnsError(t *testing.T) {
+	// ReplyTrust 用不存在的 ID → 立即返回 error（不阻塞 5s）
 	//
-	// 这个测试的真正目的是确保 ReplyTrust 不 panic、不阻塞。
-	done := make(chan error, 1)
+	// 这是 v0.5.2 行为变化的关键测试：旧版 replyCh 容量 1 让 send 默默成功
+	// （无 waiter 也写入 buffered channel），新版用 map 查找严格按 ID 匹配，
+	// 未命中立即 error。前端拿到 error 后可以选择重发或放弃。
+	dir := t.TempDir()
+	emitter := newMockEmitter(1)
+	m, err := NewWithTrust(filepath.Join(dir, "kh"), emitter)
+	if err != nil {
+		t.Fatalf("NewWithTrust: %v", err)
+	}
+
+	// 没有 HostKeyCallback 在跑，直接用未知 ID
+	start := time.Now()
+	err = m.ReplyTrust("never-existed-xyz", "trust")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("ReplyTrust (unknown ID) should return error, got nil")
+	}
+	if !strings.Contains(err.Error(), "no pending request") {
+		t.Errorf("err = %v, want 'no pending request' in message", err)
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("elapsed = %s, want < 100ms (should not block 5s)", elapsed)
+	}
+
+	// 第二个变体：模拟 "有 waiter 挂着，但用错的 ID 调 ReplyTrust"
+	//   启一个 HostKeyCallback 在 select 等，缩短 timeout 让它 timeout 后退出
+	//   期间用错 ID 调 ReplyTrust → 立即 error
+	signer := generateTestKey(t)
+	cb := m.HostKeyCallback()
+
+	origTimeout := TrustRequestTimeout
+	TrustRequestTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { TrustRequestTimeout = origTimeout })
+
+	// 启动 callback 在后台跑（会 emit，然后等 500ms timeout）
+	callbackDone := make(chan struct{})
 	go func() {
-		done <- m.ReplyTrust("any-id", "trust")
+		defer close(callbackDone)
+		_ = cb("blocked.example.com", &net.TCPAddr{}, signer.PublicKey())
 	}()
 
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("ReplyTrust (no pending) should succeed (buffered), got %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("ReplyTrust (no pending) blocked > 2s — should be immediate")
+	// 等 emit 被消费（mockEmitter 收到 emit 后 unblock 没人消费，但 waitForCall 不在主路径上）
+	// 简单起见，等 50ms 给 callback 时间注册到 map
+	time.Sleep(50 * time.Millisecond)
+
+	start = time.Now()
+	err = m.ReplyTrust("wrong-id-12345", "trust")
+	elapsed = time.Since(start)
+
+	if err == nil {
+		t.Fatal("ReplyTrust (wrong ID while waiter pending) should return error, got nil")
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("elapsed = %s, want < 100ms (should not block 5s)", elapsed)
+	}
+
+	// 等 callback 自然 timeout 退出，defer 清 map
+	<-callbackDone
+	m.trustMu.Lock()
+	waiters := len(m.trustWaiters)
+	m.trustMu.Unlock()
+	if waiters != 0 {
+		t.Errorf("trustWaiters size = %d after callback timeout, want 0", waiters)
 	}
 }
 

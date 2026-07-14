@@ -203,10 +203,25 @@ func (c *Connector) Dial(ctx context.Context, params connect.DialParams) (net.Co
 //
 // 流程：
 //  1. 把 net.Conn 还原为 *sshConn（拿到 *ssh.Client）
-//  2. NewSession → RequestPty → Setenv → Shell
+//  2. NewSession → RequestPty → Setenv → StdinPipe/StdoutPipe → Shell
 //  3. 把 *ssh.Session 包装到 *sshSession 返回
 //
 // 任何步骤失败都会回滚已分配的资源（关闭 session / conn）。
+//
+// ⚠️ 顺序守门 (v0.5.2 integration test)
+// StdinPipe/StdoutPipe 必须在 Shell() 之前调。
+// x/crypto v0.22.0 的 Session.StdinPipe 在 started==true 时返回
+// "StdinPipe after process started" 错误，而 Shell() 内部
+// s.start() 会把 s.started 置 true。
+// v0.1 - v0.5.0 一直写反了，只是没有真 SSH server 的 integration test
+// 触发这个错误 —— v0.5.1 写 in-process SSH server 时第一次发现并修复。
+// v0.5.2 起由 internal/sshclient/integration_test.go 守住：
+//   - TestConnector_OpenSession_FullSFTPPath（主测试，完整端到端）
+//   - TestConnector_OpenSession_StdinPipeOrderRegression（聚焦测试）
+// 改这条路径前先跑：
+//   go test -count=1 -race ./internal/sshclient/...
+// 看到 3 个 PASS（keepalive 2 个 + integration 2 个；RawClientLifecycle + 2
+// 集成 = 3 个新增）才算过。
 func (c *Connector) OpenSession(ctx context.Context, conn net.Conn, opts connect.SessionOpts) (connect.Session, error) {
 	if conn == nil {
 		return nil, errors.New("sshclient.OpenSession: nil conn")

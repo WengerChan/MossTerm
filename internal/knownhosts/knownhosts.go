@@ -8,6 +8,9 @@
 //   - v0.2.0b 起支持 OpenSSH 完整 host pattern：通配符、端口、IP 范围
 //   - v0.5.0 起支持"首次信任"UI 对话框：未知 host key 经 Wails 事件总线
 //     推给前端，前端 modal 让用户选 trust/reject
+//   - v0.5.2 起支持并发 SSH 连接同时 trust 多个未知 host：每个
+//     HostKeyCallback 独立 per-request reply channel（trustWaiters map），
+//     互不干扰
 //
 // 安全语义：
 //   - "找到且匹配" → 放行
@@ -15,6 +18,8 @@
 //   - "未找到"（new host）→
 //     - v0.5.0+：经 EventEmitter 推给前端，用户 trust 后 Add 写入 + 放行；
 //       reject 或 60s 超时则拒绝。
+//     - v0.5.2+：多个并发 SSH 连接同时请求 trust 时，各自独立等待
+//       各自 ID 对应的 reply，per-request channel 隔离。
 //     - 兜底（无 emitter / 单元测试）：自动 Add 写入 + 放行（v0.1.3 行为）
 //
 // 与 sshclient 的关系：
@@ -57,13 +62,16 @@ import (
 // 暴露为 var（非 const）便于单元测试覆盖；生产代码不应改写。
 var TrustRequestTimeout = 60 * time.Second
 
-// replyChannelCapacity 是 Manager 内部 trustReplyCh 的容量。
+// replyChannelBufferSize 是每个 per-request reply channel 的容量。
 //
-// 容量为 1：保证 ReplyTrust 在没有挂起请求时也能立即返回（不阻塞），
-// 而不会无限堆积过期 reply。多个并发 SSH 连接同时请求 trust 时只有第一
-// 个会拿到 reply，其余会 timeout —— 这是 v0.5.0 的已知限制，参见
-// HostKeyCallback 内的注释。
-const replyChannelCapacity = 1
+// 容量为 1：保证 ReplyTrust 在 handler 仍持 receiver 的情况下也能立即写入
+// （即"handler 还没退出 select"时不阻塞）。具体而言：
+//   - v0.5.2+：每个 HostKeyCallback 独立创建 make(chan TrustReply, 1)；
+//     该 channel 只被该 callback 接收，永远只会有 0 或 1 条消息，
+//     send 不会阻塞。
+//   - 不设 buffer (size 0) 理论可行，但要求"ReplyTrust 必须在 callback 进
+//     select 之后才能 send"，时序脆弱；size 1 消除这个时序约束。
+const replyChannelBufferSize = 1
 
 // TrustRequest 是推给前端的"是否信任此 host"请求。
 //
@@ -127,10 +135,38 @@ type Manager struct {
 
 	// emitter 是 v0.5.0+ 首次信任 GUI 通道。nil 时退化到 v0.1.3 自动信任。
 	emitter EventEmitter
-	// trustReplyCh 接收前端回传的 TrustReply（wailsbinding TrustHost 调 ReplyTrust 写入）。
-	// 容量为 1，避免 ReplyTrust 在无挂起请求时阻塞，也避免过期 reply 堆积。
-	// channel 自身的 send/receive 自带 happens-before 保证，无需额外锁。
-	trustReplyCh chan TrustReply
+
+	// trustMu 保护 trustWaiters。是独立于 mu（保护 entries）的互斥锁，
+	// 避免和 m.Add 持 mu 时形成嵌套锁（lock ordering: 绝不同时持有
+	// trustMu 和 mu）。
+	//
+	// 为什么独立：m.Add 持 mu 期间要做文件 IO（os.OpenFile + WriteString），
+	// 不应被"信任 map"的关键区阻塞；同时如果 trustMu 与 mu 合并，HostKeyCallback
+	// 的 defer 删 waiter 会和"已知 host 路径的 m.mu.RLock 持锁读 entries"
+	// 形成不必要的串行化。独立锁让两条路径完全解耦。
+	trustMu sync.Mutex
+
+	// trustWaiters 是当前挂起等待用户 trust 决策的 HostKeyCallback 列表。
+	//
+	// key 是 TrustRequest.ID（每个 HostKeyCallback 调 generateTrustID 生成）；
+	// value 是该 callback 私有的 reply channel（容量 replyChannelBufferSize，
+	// 专供该 callback 接收一次 reply）。
+	//
+	// 生命周期（per-request channel 模式）：
+	//  1. HostKeyCallback 调 generateTrustID 生成 ID
+	//  2. 创建 replyCh := make(chan TrustReply, replyChannelBufferSize)
+	//  3. 拿 trustMu，写入 map[ID] = replyCh
+	//  4. defer 在函数退出（trust / reject / timeout 任何分支）时拿 trustMu 删除
+	//  5. 调 emitter.EmitTrustRequest 给前端
+	//  6. select 等 replyCh 或 timeout
+	//
+	// v0.5.2 重设计：之前用 trustReplyCh chan TrustReply（容量 1，单 channel），
+	// 多个 SSH 连接同时触发 trust 时只有第一个能拿到正确 reply（其他拿到的
+	// 是 ID mismatch 的"别人的 reply"），其余会 timeout。改成 per-request
+	// channel map 后，任意 N 个并发连接都能各自等待各自的决策，无干扰。
+	//
+	// 旧设计的"已知限制"（v0.5.0 dev-log 写"留给 v0.6+"）v0.5.2 兑现。
+	trustWaiters map[string]chan TrustReply
 }
 
 // entry 对应 known_hosts 文件的一行。
@@ -197,9 +233,9 @@ func newManager(path string, emitter EventEmitter) (*Manager, error) {
 		return nil, fmt.Errorf("knownhosts.New: mkdir parent: %w", err)
 	}
 	m := &Manager{
-		path:          path,
-		emitter:       emitter,
-		trustReplyCh:  make(chan TrustReply, replyChannelCapacity),
+		path:         path,
+		emitter:      emitter,
+		trustWaiters: make(map[string]chan TrustReply),
 	}
 	// 文件不存在 → 创建空文件（首次运行）
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
@@ -238,17 +274,20 @@ func (m *Manager) Size() int {
 //  3. host 全无匹配 → 走"首次信任"路径：
 //     a) emitter 非 nil → EmitTrustRequest 给前端；等用户响应
 //        - "trust" → Add 写入 + 放行
-//        - "reject" / 错误 ID / 超时 → 拒绝
+//        - "reject" 或超时 → 拒绝
 //     b) emitter 为 nil → 自动 Add 写入文件 + 放行（v0.1.3 兜底）
 //
 // 签名遵循 x/crypto v0.22+：返回 error 而非 bool（nil = 放行）。
 //
-// 并发：多个 SSH 连接可能同时触发 HostKeyCallback。trustReplyCh 容量 1
-// 的设计意味着：第一个等待者拿到 reply 后，reply 被消费；第二个等待者
-// 拿到的是别人的 reply（ID 不匹配）或 timeout。
-// v0.5.0 的实际场景（用户在 modal 里点 trust 之前不会同时点第二次连接）
-// 下这个限制可接受；并发 trust 场景需要 map[requestID]chan TrustReply，
-// 留给 v0.6+ 优化。
+// 并发：多个 SSH 连接可能同时触发 HostKeyCallback（典型场景：批量连接
+// 多个新 host，每个都弹 trust modal 让用户决策）。v0.5.2 起每个 callback
+// 独立创建 replyCh 并注册到 trustWaiters map，按 ID 路由：ReplyTrust(ID)
+// 直接写对应 callback 的 replyCh，互不干扰。任意 N 个并发连接都能各自
+// 等待各自的决策，没有"第一个拿 reply 其余 timeout"的限制。
+//
+// 锁顺序约束：trustMu 和 mu（保护 entries 的读写锁）绝不同时持有。
+// 具体：注册 waiter / defer 删 waiter 只持 trustMu；m.Add 只持 mu。
+// 等待 replyCh 的 select 期间两个锁都不持。
 func (m *Manager) HostKeyCallback() ssh.HostKeyCallback {
 	return func(host string, remote net.Addr, key ssh.PublicKey) error {
 		a := parseAddr(host)
@@ -303,19 +342,31 @@ func (m *Manager) HostKeyCallback() ssh.HostKeyCallback {
 			FullKey:     keyBase64,
 		}
 
+		// v0.5.2 per-request reply channel：
+		//  1. 创建一个容量 1 的 channel 专供本次 callback 接收 reply
+		//  2. 注册到 trustWaiters map（持 trustMu 短临界区）
+		//  3. defer 在函数退出时删 map entry，避免泄露
+		//  4. emit 给前端（实现应非阻塞）
+		//  5. select 等 replyCh 或 timeout
+		//
+		// ID mismatch 不可能发生：replyCh 一一对应，ReplyTrust 拿
+		// requestID 找对应 ch 写入，select 拿到的 reply.ID 必然等于 req.ID。
+		replyCh := make(chan TrustReply, replyChannelBufferSize)
+		m.trustMu.Lock()
+		m.trustWaiters[req.ID] = replyCh
+		m.trustMu.Unlock()
+		defer func() {
+			m.trustMu.Lock()
+			delete(m.trustWaiters, req.ID)
+			m.trustMu.Unlock()
+		}()
+
 		// 推给前端（非阻塞；实现应立即返回，自身 spawn 协程或仅 emit 事件）
 		m.emitter.EmitTrustRequest(context.Background(), req)
 
 		// 同步等待用户回复（带超时）。
-		//
-		// channel send/receive 自带 happens-before 保证，无需额外锁。
 		select {
-		case reply := <-m.trustReplyCh:
-			if reply.ID != req.ID {
-				// ID 不匹配：多半是并发场景下拿到了"别人的 reply"或"过期的 reply"。
-				// 当前 reply 已被消费，挂起方将 timeout。
-				return fmt.Errorf("knownhosts: trust reply ID mismatch (want %q, got %q)", req.ID, reply.ID)
-			}
+		case reply := <-replyCh:
 			if reply.Action == "trust" {
 				if err := m.Add(host, key, "mossterm-user"); err != nil {
 					return fmt.Errorf("knownhosts: persist trusted key: %w", err)
@@ -406,32 +457,49 @@ func (m *Manager) Close() error {
 	return nil
 }
 
-// ReplyTrust 把前端用户的决策写回 Manager，唤醒挂起的 HostKeyCallback。
+// ReplyTrust 把前端用户的决策路由回对应的挂起 HostKeyCallback。
 //
 // 由 wailsbindings.App.TrustHost 调用：前端 modal 收到用户点击后，
 // 立刻通过 wails 反射调 TrustHost(id, action) → ReplyTrust(id, action)。
 //
-// 行为：
-//   - 5s 内能写入 trustReplyCh（容量 1）→ 成功；HostKeyCallback 拿到 reply。
-//   - 5s 内写不进去（无挂起请求 / 上一个 reply 还没被消费）→ 返回 error。
+// 行为（v0.5.2 per-request channel 模式）：
+//   - 在 trustWaiters map 中找到 requestID 对应的 replyCh：
+//     - 5s 内能写入（replyCh 容量 1，正常立即成功）→ 返回 nil。
+//     - 5s 内写不进去（极端：handler 死锁 / channel 满了但 receiver 没消费）→ 返回 error。
+//   - 找不到 requestID（已 timeout / 已 reject / ID 错误）→ 立即返回 error。
+//
+// 锁：拿 trustMu 做 map 查找（短临界区）。写入 replyCh 时**不持** trustMu，
+// 避免和 HostKeyCallback 的 defer "持 trustMu 删 waiter" 形成死锁。
 //
 // 注意：返回 error 不代表"用户的决策丢了"——前端可以根据错误重发，
 // 也可以直接关闭 modal 让 SSH 连接走 timeout 失败路径。
 //
-// 锁：channel send/receive 自带 happens-before 保证，ReplyTrust 自身
-// 不需要额外锁。
+// v0.5.0 行为差异：旧版 replyCh 容量 1 单独 channel，无挂起时 send 也
+// 成功（写入 buffered channel 等下一个 callback 来消费，ID 必然不匹配）。
+// v0.5.2 起 map 查找未命中立即 error，语义更准确（前端可以重试/放弃）。
 func (m *Manager) ReplyTrust(requestID, action string) error {
-	if m.trustReplyCh == nil {
+	if m.trustWaiters == nil {
 		return errors.New("knownhosts.ReplyTrust: manager not initialized with NewWithTrust")
 	}
 
-	// 5s 兜底：正常情况下 replyCh 容量 1 总是能立即写入。
-	// 这层 select 只在异常（重复 reply / 无挂起请求）触发。
+	m.trustMu.Lock()
+	ch, ok := m.trustWaiters[requestID]
+	m.trustMu.Unlock()
+
+	if !ok {
+		// 没找到 waiter：可能 ID 写错 / HostKeyCallback 已 timeout 退出 /
+		// 已 reject 退出 / defer 已删 map entry。
+		return errors.New("knownhosts.ReplyTrust: no pending request for ID " + requestID)
+	}
+
+	// 5s 兜底：正常情况下 replyCh 容量 1，send 立即成功（receiver 在
+	// HostKeyCallback 的 select 里等着）。
+	// 这层 select 只在异常（重复 reply / handler 死锁）触发。
 	select {
-	case m.trustReplyCh <- TrustReply{ID: requestID, Action: action}:
+	case ch <- TrustReply{ID: requestID, Action: action}:
 		return nil
 	case <-time.After(5 * time.Second):
-		return errors.New("knownhosts.ReplyTrust: no pending request (or reply channel full)")
+		return errors.New("knownhosts.ReplyTrust: reply channel full or handler deadlocked")
 	}
 }
 
