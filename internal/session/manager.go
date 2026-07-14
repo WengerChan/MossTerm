@@ -254,13 +254,19 @@ func (m *MemoryManager) Open(ctx context.Context, req OpenRequest) (Session, err
 // 之前已注册的 subscriber 仍可通过 Info().State 看到 Failed（state 事件已 publish）。
 //
 // 关闭语义 + race 处理：
-//   每一步状态转换用 setStateIf（CAS）做"check-and-set"——如果 Close 已经
-//   抢先把 state 推到 Closing/Closed，CAS 失败，本 goroutine 释放已分配资源
-//   （conn.Close / sshSess.Close）后退出，不覆盖 Close 写入的 Closed。
+//   每一步状态转换用 setStateAndPublishIf（CAS + publish 在 publishMu 内）做
+//   "check-and-set"——如果 Close 已经抢先把 state 推到 Closing/Closed，CAS
+//   失败，本 goroutine 释放已分配资源（conn.Close / sshSess.Close）后退出，
+//   不覆盖 Close 写入的 Closed。
 //
 //   这避免了 v0.1.x 那种"A: isClosedOrClosing()=false / B: Close 把 state→Closed
 //   / A: setState(Authenticating) 覆盖 Closed"的 race（subscriber 会看到
 //   Connecting → Closed → Authenticating 的荒谬时序）。
+//
+// v0.2.4 行为变更：setStateAndPublishIf 把 CAS + tryPublish 合并到
+// publishMu 内执行，Close 不会在 CAS 成功与 publish 之间抢先——彻底消除
+// v0.2.1 识别的 stale event race（subscriber 短暂看到 state=Closed 但
+// event=Authenticating 的闪烁）。详见 setStateAndPublishIf 注释。
 //
 // 边界：
 //   - dial 自身的 ctx 是 caller 传入的；Close 不取消 ctx。
@@ -276,10 +282,10 @@ func (m *MemoryManager) dialInBackground(
 	if err != nil {
 		// CAS(Connecting, Failed)：若 state 已被 Close 推到 Closing/Closed 则失败，
 		// 直接退出（Close 会处理关闭流程）。
-		if !s.setStateIf(StateConnecting, StateFailed) {
+		// v0.2.4：CAS 成功时 publish 也在 publishMu 内完成，Close 不会抢先。
+		if !s.setStateAndPublishIf(StateConnecting, StateFailed) {
 			return
 		}
-		s.tryPublish(newStateEvent(StateFailed))
 		s.signalDone() // 唤醒 readLoop / writeLoop / fanoutLoop
 		slog.Default().Warn("session dial failed",
 			"id", string(s.id),
@@ -291,21 +297,19 @@ func (m *MemoryManager) dialInBackground(
 
 	// 2. Connecting → Authenticating
 	//    失败说明 Close 已抢先（state=Closing/Closed）；释放 conn 防止泄漏。
-	if !s.setStateIf(StateConnecting, StateAuthenticating) {
+	if !s.setStateAndPublishIf(StateConnecting, StateAuthenticating) {
 		_ = conn.Close()
 		return
 	}
-	s.tryPublish(newStateEvent(StateAuthenticating))
 
 	// 3. OpenSession
 	sshSess, err := s.conn.OpenSession(ctx, conn, opts)
 	if err != nil {
 		_ = conn.Close()
 		// CAS(Authenticating, Failed)：state 已被 Close 推到 Closing/Closed 则失败。
-		if !s.setStateIf(StateAuthenticating, StateFailed) {
+		if !s.setStateAndPublishIf(StateAuthenticating, StateFailed) {
 			return
 		}
-		s.tryPublish(newStateEvent(StateFailed))
 		s.signalDone()
 		slog.Default().Warn("session open session failed",
 			"id", string(s.id),
@@ -325,10 +329,9 @@ func (m *MemoryManager) dialInBackground(
 
 	// CAS(Authenticating, Established)：Close 抢先则失败；conn/sess 已被
 	// Close 取走并 close（见上），本 goroutine 直接退出。
-	if !s.setStateIf(StateAuthenticating, StateEstablished) {
+	if !s.setStateAndPublishIf(StateAuthenticating, StateEstablished) {
 		return
 	}
-	s.tryPublish(newStateEvent(StateEstablished))
 
 	slog.Default().Info("session established",
 		"id", string(s.id),

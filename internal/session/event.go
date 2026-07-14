@@ -49,6 +49,21 @@ const (
 	// 触发场景：cat GB 级日志、tail -f 高频输出等"远端 > 后端 fanout 能力"
 	// 的极端情况；正常交互式终端不会触发。
 	EventTypeOverflow EventType = "overflow"
+
+	// EventTypeSubOverflow 表示某个 subscriber 的 channel 发生过丢事件。
+	//
+	// v0.2.3 新增，与 EventTypeOverflow 是**两个不同原因**的数据丢失：
+	//   - "overflow"     = 后端 readLoop 太快 → 中央 events 通道（cap=64）丢
+	//   - "sub:overflow" = subscriber 处理太慢 → 该 sub 的 channel（cap=64）丢
+	//
+	// 前端根据 type 分别诊断与展示（"server too fast" vs "client too slow"）。
+	// 累加逻辑：broadcast 在 sub channel 满时把 ev.Data 字节数累加到
+	// subDropBytes + 置位 subDropPending，由 fanoutLoop 在每轮 broadcast 后
+	// 通过 maybeEmitSubOverflow 发出本事件。
+	//
+	// 触发场景：xterm.js 渲染卡顿 / 前端主线程 GC 暂停 / 后台 tab 节流等
+	// "subscriber 跟不上后端 fanout"的极端情况；正常 UI 不会触发。
+	EventTypeSubOverflow EventType = "sub:overflow"
 )
 
 // newDataEvent 构造一个 data 事件，附上当前时间戳。
@@ -100,6 +115,21 @@ func newExitEvent(msg string) Event {
 func newOverflowEvent(droppedBytes int64) Event {
 	return Event{
 		Type:          string(EventTypeOverflow),
+		OverflowBytes: droppedBytes,
+		At:            time.Now().UnixMilli(),
+	}
+}
+
+// newSubOverflowEvent 构造一个 sub:overflow 事件，携带自上次上报以来
+// 因 subscriber channel 满而丢失的字节总数。
+//
+// v0.2.3 新增；与 newOverflowEvent 结构完全一致，仅 Type 字段不同。
+// 关键不变量：Data 字段恒为空 —— 这正是 broadcast 默认分支
+// `len(ev.Data) > 0` 检查能"天然"避免 sub:overflow 事件被自身 drop
+// 时再次累加的根本原因（见 broadcast 与 maybeEmitSubOverflow 的 doc）。
+func newSubOverflowEvent(droppedBytes int64) Event {
+	return Event{
+		Type:          string(EventTypeSubOverflow),
 		OverflowBytes: droppedBytes,
 		At:            time.Now().UnixMilli(),
 	}

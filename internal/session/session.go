@@ -109,10 +109,16 @@ type Resize struct {
 
 // Event 是 Session 推送给订阅者的消息。
 //
-// type 取值："data" | "state" | "exit" | "error" | "overflow"；其余字段按 type 解释。
+// type 取值："data" | "state" | "exit" | "error" | "overflow" | "sub:overflow"；
+// 其余字段按 type 解释。
 //
-// overflow 类型（v0.2+）：Data / State / ExitMsg / Err 均为零值，
+// overflow 类型（v0.2.0+）：Data / State / ExitMsg / Err 均为零值，
 // OverflowBytes 携带自上次上报以来因 events 通道满而被丢弃的字节总数。
+// 语义："server too fast" —— readLoop 速率 > fanout 速率。
+//
+// sub:overflow 类型（v0.2.3+）：结构同 overflow，但语义为
+// "client too slow" —— subscriber channel 满导致单个 sub 的事件被丢。
+// 前端应根据 type 分别诊断与展示，**两套计数必须独立**。
 type Event struct {
 	Type          string `json:"type"`
 	Data          []byte `json:"data,omitempty"`

@@ -103,6 +103,26 @@ type sessionImpl struct {
 	info  atomic.Pointer[Info]
 	state atomic.Int32
 
+	// publishMu 序列化"setState + tryPublish"与 Close 的竞争。
+	//
+	// v0.2.4 新增：消除 v0.2.1 识别的"stale event" race —— CAS 成功之后
+	// Close 抢先会让 out-of-order 事件通过，subscriber 短暂看到
+	// state=Closed 但 event=Authenticating（前端 UI 闪烁）。
+	//
+	// 设计：
+	//   - setStateAndPublishIf 持 publishMu 做 CAS + tryPublish
+	//   - setStateAndPublish 持 publishMu 做无条件 set + tryPublish
+	//   - Close 持 publishMu 做 setState(Closing/Closed) + tryPublish
+	//   - readLoop / writeLoop 调 tryPublish **不**持 publishMu（hot path，
+	//     它们发的是 data 事件，没有 stale 问题）
+	//   - broadcast 持 subMu 但**不**持 publishMu（fanoutLoop 调的）
+	//
+	// 死锁防御：publishMu 不与 subMu / connMu 嵌套
+	//   - Close 在 publishMu 内 publish 后释放，再去拿 connMu / subMu
+	//   - broadcast 只在 subMu 内做 fan-out
+	//   - tryPublish 自身不持任何锁（仅 channel send + atomic）
+	publishMu sync.Mutex
+
 	// 协议层对象。
 	//
 	// conn 持 connector 引用（用于 v0.2+ 重新拨号 / SFTP subsystem 复用）；
@@ -151,6 +171,27 @@ type sessionImpl struct {
 	// Store(true) 之前（v0.2 单调用点天然满足）。
 	overflowBytes   atomic.Int64
 	overflowPending atomic.Bool
+
+	// Sub drop 计数（v0.2.3 新增）。
+	//
+	// 与 overflowBytes 的区别（必须**严格区分**，前端据此分别诊断）：
+	//   - overflowBytes：readLoop 太快 → 中央 events 通道（cap=64）丢
+	//   - subDropBytes：subscriber 处理太慢 → 该 sub 的 channel（cap=64）丢
+	//
+	// 设计完全镜像 v0.2.0 的 overflow 机制：
+	//   - broadcast 在 sub channel 满时 Add(len(ev.Data)) + Store(true)
+	//   - fanoutLoop 每轮 broadcast 后调 maybeEmitSubOverflow
+	//   - 两者 lock-free；唯一约束是 broadcast 的 Add 必须在 Store(true) 之前
+	//     （broadcast 内部顺序写定，天然满足）
+	//
+	// **不变量**（与 overflow 不同的关键点）：
+	//   - 累加条件是 `len(ev.Data) > 0`；overflow / sub:overflow / state /
+	//     exit / error 事件被 sub drop 时**不**会被累加（Data 字段为空）
+	//   - 因此 sub:overflow 事件被 sub drop 时不会触发新的 sub:overflow，
+	//     从根本上避免了"广播一个 drop 通知、又被 drop、再广播一个..."
+	//     的递归（最坏情况下 sub:overflow 事件被 drop 一次就丢失，副作用为零）
+	subDropBytes   atomic.Int64
+	subDropPending atomic.Bool
 
 	// 可选 logger；nil 时回退到 slog.Default()。
 	log *slog.Logger
@@ -268,20 +309,27 @@ func (s *sessionImpl) Subscribe() (<-chan Event, func()) {
 //
 // 关闭流程：
 //  1. closeOnce 保护，确保只执行一次
-//  2. state → Closing（发布事件）
-//  3. sess.Close + dialed.Close（释放协议层）
+//  2. state → Closing（在 publishMu 内发布事件，dialInBackground 不会抢先）
+//  3. 释放 publishMu，做 IO：sess.Close + dialed.Close（**不**持 publishMu）
 //  4. close(done) 唤醒所有阻塞中的 goroutine
-//  5. state → Closed + 关闭 sub channels（让订阅者 range 退出）
+//  5. state → Closed（再次拿 publishMu 发布事件）
+//  6. 关闭 sub channels（让订阅者 range 退出）
+//
+// v0.2.4 行为变更：状态转换与事件发布序列化在 publishMu 内，彻底消除
+// v0.2.1 识别的 stale event race（详见 publishMu 字段注释）。
+// IO 步骤（sess.Close / dialed.Close）放在 publishMu 外，**不**持锁
+// 阻塞等外部协议层响应——避免 Close 在慢 IO 上挂住 publishMu，
+// 间接卡住 dialInBackground 的状态转换。
 func (s *sessionImpl) Close(_ bool) error {
 	s.closeOnce.Do(func() {
 		current := State(s.state.Load())
 		if current == StateClosed {
 			return
 		}
-		s.setState(StateClosing)
-		s.tryPublish(newStateEvent(StateClosing))
+		// 1. 推 Closing 事件（publishMu 内，Close 路径串行化）
+		s.setStateAndPublish(StateClosing)
 
-		// 在持写锁的情况下取出引用、置 nil、释放锁
+		// 2. 释放 publishMu，做 IO（conn/sess Close 可能阻塞）
 		s.connMu.Lock()
 		sess := s.sess
 		s.sess = nil
@@ -296,14 +344,13 @@ func (s *sessionImpl) Close(_ bool) error {
 			_ = dialed.Close()
 		}
 
-		// 唤醒 fanoutLoop / writeLoop / readLoop
+		// 3. 唤醒 fanoutLoop / writeLoop / readLoop
 		s.signalDone()
 
-		// 最后状态
-		s.setState(StateClosed)
-		s.tryPublish(newStateEvent(StateClosed))
+		// 4. 推 Closed 事件（再次拿 publishMu）
+		s.setStateAndPublish(StateClosed)
 
-		// 关闭所有订阅 channel：让订阅者 range 退出
+		// 5. 关闭所有订阅 channel：让订阅者 range 退出
 		s.subMu.Lock()
 		for id, ch := range s.subs {
 			close(ch)
@@ -339,36 +386,66 @@ func (s *sessionImpl) State() State {
 // 内部：状态 / 发布 / 广播
 // -----------------------------------------------------------------------------
 
-// setState 原子地更新状态。
-func (s *sessionImpl) setState(st State) {
-	s.state.Store(int32(st))
+// setStateAndPublish 原子地更新 state 并发布对应的 state 事件。
+//
+// v0.2.4 新增：消除 v0.2.1 识别的 stale event race。持 publishMu 期间
+// state.Store + tryPublish 是原子的，Close 不会在中间抢先发布 Closing/Closed。
+//
+// 与 setStateAndPublishIf 的区别：本方法**无 CAS**，无条件设置；适用
+// 于 Close 路径（已经被 closeOnce 序列化，不会被另一个 Close 并发）。
+//
+// 跳过逻辑：若当前 state 已等于 st，则不发布事件（避免重复 transition）。
+// v0.2.1 旧 setState 同样跳过——保留语义兼容。
+func (s *sessionImpl) setStateAndPublish(st State) {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	s.setStateAndPublishLocked(st)
 }
 
-// setStateIf 原子地比较并设置 state：仅当当前 state 等于 expect 时才改为 to。
+// setStateAndPublishLocked 是 setStateAndPublish 的"持锁版"内部方法。
+//
+// 调用方必须已持有 publishMu；本方法只做 state 比较/写入 + tryPublish，
+// **不**再获取 publishMu（否则会自死锁）。
+//
+// 锁顺序约束：调用本方法时 publishMu 必须被持有，且**不**持 subMu / connMu。
+// 详见 publishMu 字段注释。
+func (s *sessionImpl) setStateAndPublishLocked(st State) {
+	if State(s.state.Load()) == st {
+		return
+	}
+	s.state.Store(int32(st))
+	s.tryPublish(newStateEvent(st))
+}
+
+// setStateAndPublishIf 是 setStateIf + tryPublish 的合并版本。
+//
+// v0.2.4 替换 v0.2.1 的"setStateIf + 单独 tryPublish"模式：持 publishMu
+// 期间 CAS + publish 是原子的，Close 不会在中间抢先——彻底消除 v0.2.1
+// 识别的 stale event race（subscriber 短暂看到 state=Closed 但
+// event=Authenticating 的闪烁）。
+//
 // 返回 true 表示 CAS 成功。
 //
-// v0.2.0a 新增：dialInBackground 用它防止"setState 覆盖 Closed" race。
+// race 场景（v0.2.1 未修，v0.2.4 修复）：
 //
-// race 场景（v0.1.x 不存在，v0.2.0a 异步 dial 后才出现）：
+//	goroutine A (dialInBackground): setStateIf(Connecting, Authenticating) ✅
+//	goroutine B (Close):            setState(Closing) → setState(Closed) ✅
+//	goroutine A:                    tryPublish(Authenticating) ❌ 发出过期事件
 //
-//	goroutine A (dialInBackground): isClosedOrClosing()=false  (state=Connecting)
-//	goroutine B (Close):            setState(Closing) → setState(Closed)
-//	goroutine A:                    setState(Authenticating)  ❌ 覆盖 Closed
-//	goroutine A:                    tryPublish(Authenticating)  ❌ 发出过期事件
+// 修复后：setStateAndPublishIf 在 publishMu 内做 CAS + publish，B 想
+// 推 Closing 必须等 A 释放 publishMu；之后 A 的 publish 一定先于
+// B 的 Closing/Closed publish，subscriber 看到的时序单调。
 //
-// CAS 把"检查+设置"合并成原子操作：若 Close 抢先，state 已不是 expect，
-// setStateIf 失败，dialInBackground 不发布 state event、释放已分配资源后退出。
-//
-// 边界情况：CAS 成功之后 Close 才抢先（A 已发布 Authenticating event，
-// 之后 state 被 B 改成 Closing/Closed）。这种情况下 subscriber 会看到
-// 一个"过期"事件 —— 但 Info().State 仍是 Closed，subscriber 自身应
-// 丢弃这种"事件 state 早于 Info().State"的不一致。完全消除需要把
-// setState + tryPublish 放在同一把锁里（Close 也得拿），属于 v0.2.x
-// 范围之外的过度设计。
-//
-// 注意：Close 自己用 closeOnce 序列化整个 Close 流程，无须走 CAS。
-func (s *sessionImpl) setStateIf(expect, to State) bool {
-	return s.state.CompareAndSwap(int32(expect), int32(to))
+// 调用方：dialInBackground 在 Connecting → Authenticating / Failed /
+// Authenticating → Established / Failed 等转换点。
+func (s *sessionImpl) setStateAndPublishIf(expect, to State) bool {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+	if s.state.CompareAndSwap(int32(expect), int32(to)) {
+		s.tryPublish(newStateEvent(to))
+		return true
+	}
+	return false
 }
 
 // signalDone 一次性关闭 s.done channel。
@@ -432,6 +509,22 @@ func (s *sessionImpl) tryPublish(ev Event) {
 }
 
 // broadcast 把事件扇出到所有 subscriber，consumer 慢则丢弃。
+//
+// v0.2.3 新增 sub drop 累加：sub channel 满时把 ev.Data 字节数累加到
+// subDropBytes + 置位 subDropPending，由 fanoutLoop 在下一轮 broadcast
+// 后通过 maybeEmitSubOverflow emit 一个 sub:overflow 事件给所有 subscriber。
+//
+// 关键不变量（防递归的根因）：累加条件是 `len(ev.Data) > 0`，因此
+//   - sub:overflow / overflow / state / exit / error 事件被 sub drop 时
+//     **不**会被累加（它们的 Data 字段为空）
+//   - 即使 sub:overflow 事件被某 sub 再次 drop，也只丢这一次，不会触发
+//     "广播 drop 通知 → 又被 drop → 再广播 drop 通知..."的递归
+//   - 最坏情况：sub:overflow 事件被 drop 一次就丢失，**副作用为零**
+//
+// 与 tryPublish 的 overflow 累加是**两套独立机制**，因为它们衡量的是
+// 两个不同的瓶颈：
+//   - tryPublish 累加 = "events 通道满"，后端 IO 太快（readLoop 速率 > fanout）
+//   - broadcast 累加  = "sub channel 满"，前端处理太慢（subscriber < fanout）
 func (s *sessionImpl) broadcast(ev Event) {
 	s.subMu.Lock()
 	defer s.subMu.Unlock()
@@ -439,7 +532,12 @@ func (s *sessionImpl) broadcast(ev Event) {
 		select {
 		case ch <- ev:
 		default:
-			// 该 sub 处理太慢，丢弃。生产环境可在这里计数 / log。
+			// 该 sub 处理太慢，丢弃。v0.2.3 起累加到 subDropBytes
+			// 供 fanoutLoop 后续 emit sub:overflow 事件。
+			if n := len(ev.Data); n > 0 {
+				s.subDropBytes.Add(int64(n))
+				s.subDropPending.Store(true)
+			}
 		}
 	}
 }
@@ -608,9 +706,16 @@ func (s *sessionImpl) writeLoop() {
 // v0.2 新增：每次 broadcast 后检查 overflowPending；置位则清空计数器
 // 并 broadcast 一个 overflow 事件（不经过 events 通道，直接发给 subs）。
 //
-// 为什么不走 events 通道：overflow 事件是元数据，不是数据流的一环；
-// 走 events 会让 events 通道在已经溢出的场景下再多占一个槽位，
-// 加剧溢出。直接 broadcast 由 fanoutLoop 的锁保护，并发安全。
+// v0.2.3 新增：sub drop 旁路 emit。每次 broadcast 后再检查
+// subDropPending；置位则清空计数器并 broadcast 一个 sub:overflow 事件。
+// 两个 emit 顺序：先 maybeEmitOverflow（events 通道丢）再 maybeEmitSubOverflow
+// （sub channel 丢）；两者**必须独立**，因为它们衡量的是不同瓶颈，
+// 前端根据 type 分别诊断（"server too fast" vs "client too slow"）。
+//
+// 为什么不走 events 通道：overflow / sub:overflow 事件是元数据，
+// 不是数据流的一环；走 events 会让 events 通道在已经溢出的场景下
+// 再多占一个槽位，加剧溢出。直接 broadcast 由 fanoutLoop 的锁保护，
+// 并发安全。
 func (s *sessionImpl) fanoutLoop() {
 	for {
 		select {
@@ -620,6 +725,7 @@ func (s *sessionImpl) fanoutLoop() {
 			}
 			s.broadcast(ev)
 			s.maybeEmitOverflow()
+			s.maybeEmitSubOverflow()
 		case <-s.done:
 			// 关停前 drain 一遍 events 里的剩余事件，让 sub 看到完整时序
 			for {
@@ -630,6 +736,7 @@ func (s *sessionImpl) fanoutLoop() {
 					}
 					s.broadcast(ev)
 					s.maybeEmitOverflow()
+					s.maybeEmitSubOverflow()
 				default:
 					return
 				}
@@ -653,6 +760,30 @@ func (s *sessionImpl) maybeEmitOverflow() {
 	bytes := s.overflowBytes.Swap(0)
 	if bytes > 0 {
 		s.broadcast(newOverflowEvent(bytes))
+	}
+}
+
+// maybeEmitSubOverflow 在 subDropPending 置位时清空计数器并 broadcast
+// 一个 sub:overflow 事件。仅在 fanoutLoop 里调用。
+//
+// v0.2.3 新增；与 maybeEmitOverflow 完全镜像（同样的并发安全论证）：
+//   - pending 置位才检查（lock-free fast path）
+//   - 先清 pending 再 Swap(0)，并发 Add 不会丢字节
+//   - bytes > 0 才发（保留并发 corner case 的兜底）
+//
+// 与 maybeEmitOverflow **必须独立**：data overflow 与 sub drop 是不同瓶颈，
+// 前端根据 type 分别诊断，**绝不能合并上报**（v0.2.0 既有机制 + v0.2.3
+// 新增机制各管各的计数器）。
+func (s *sessionImpl) maybeEmitSubOverflow() {
+	if !s.subDropPending.Load() {
+		return
+	}
+	// 先清 pending 再 Swap；若两者之间有并发 Add，新 Add 会再次
+	// Store(true) 让下一轮再处理 —— 不丢字节。
+	s.subDropPending.Store(false)
+	bytes := s.subDropBytes.Swap(0)
+	if bytes > 0 {
+		s.broadcast(newSubOverflowEvent(bytes))
 	}
 }
 
