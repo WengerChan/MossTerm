@@ -31,7 +31,7 @@ permissions:
 env:
   # 最低 1.23+ —— wails 2.12 + x/crypto v0.22 推荐；本地是 1.26.x
   GO_VERSION: "1.23"
-  NODE_VERSION: "20"
+  NODE_VERSION: "24"
   WAILS_VERSION: "v2.12.0"
   # 本仓库 module 路径
   GO_PACKAGE: github.com/mossterm/mossterm
@@ -64,7 +64,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
       - name: go mod download
         run: go mod download
@@ -93,10 +92,12 @@ jobs:
           govulncheck ./...
 
       # —— 前端三件套：lint / typecheck / build，全部 fail-fast ——
+      # 注：v0.5.4 时 frontend/ 还没有 package-lock.json（v0.0 占位），
+      # 用 npm install 而不是 npm ci；lockfile 后续 vendor 后改为 npm ci。
       - name: 前端依赖安装
         run: |
           cd frontend
-          npm ci
+          npm install
 
       - name: 前端 typecheck
         run: |
@@ -213,7 +214,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
       - name: 安装 Linux 桌面依赖 (gtk3 + webkit)
         if: runner.os == 'Linux'
@@ -233,7 +233,7 @@ jobs:
       - name: 前端依赖安装
         run: |
           cd frontend
-          npm ci
+          npm install
 
       - name: 计算构建元数据
         id: meta
