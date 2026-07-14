@@ -49,6 +49,13 @@ export class App {
   static SftpRename(sessionID: string, oldPath: string, newPath: string): Promise<void>;
   static SftpRead(sessionID: string, path: string): Promise<Uint8Array>;
   static SftpWrite(sessionID: string, path: string, data: Uint8Array): Promise<void>;
+
+  // v0.5.3 SFTP drag-drop 上传：把前端 Uint8Array 一次性写到远端。
+  // 与 SftpWrite 的区别：返回写入字节数（前端可以做更详细的反馈），
+  // 专属 path 给 SftpBrowser 的 drag-drop handler 用。
+  // 限制：v0.5.3 不分片，前端应先校验大小（推荐 ≤ 100 MiB），
+  // 否则一次性 readAsArrayBuffer 会卡 UI。
+  static SftpUploadFile(sessionID: string, remotePath: string, content: Uint8Array): Promise<number>;
 }
 
 // =====================================================================

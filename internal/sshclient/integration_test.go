@@ -30,12 +30,14 @@
 package sshclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +48,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/mossterm/mossterm/internal/connect"
+	"github.com/mossterm/mossterm/internal/sftpclient"
 )
 
 // -----------------------------------------------------------------------------
@@ -76,6 +79,17 @@ type sshIntegrationServer struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	closeOnce sync.Once
+
+	// sftpHandlers 是 v0.5.3 共享的 InMemFS Handlers（4 个 method 共享一个 root）。
+	//
+	// 原 v0.5.2 实现每次 SFTP channel 调 sftp.InMemHandler() —— 内部 root + files map
+	// 是新建的，导致 test 调"第二个 sftp.NewClient"读 server 端文件时拿不到
+	// "第一个 client 写入的内容"（file does not exist）。
+	//
+	// 现在 sftp.InMemHandler() 只在 server 启动时调一次，所有 SFTP channel 共享
+	// 同一组 Handlers（内部 4 个 method 引用同一个 root），跨 sftp.NewClient
+	// 的 read/write 一致。
+	sftpHandlers sftp.Handlers
 
 	// t 用于把 SFTP server 错误通过 t.Log 报告（不通过 slog，避免污染 stderr）
 	t *testing.T
@@ -111,12 +125,18 @@ func newSSHIntegrationServer(t *testing.T) *sshIntegrationServer {
 
 	// 4. 启动 acceptLoop
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// 5. v0.5.3：构造共享 InMemFS Handlers（4 个 method 引用同一个 root，
+	// 跨 sftp.NewClient 的 read/write 一致）
+	sharedHandlers := sftp.InMemHandler()
+
 	s := &sshIntegrationServer{
-		listener:  l,
-		serverCfg: serverCfg,
-		ctx:       ctx,
-		cancel:    cancel,
-		t:         t,
+		listener:    l,
+		serverCfg:   serverCfg,
+		ctx:         ctx,
+		cancel:      cancel,
+		sftpHandlers: sharedHandlers,
+		t:           t,
 	}
 	s.wg.Add(1)
 	go s.acceptLoop()
@@ -299,13 +319,14 @@ func (s *sshIntegrationServer) serveShell(ch ssh.Channel) {
 	_, _ = io.Copy(io.Discard, ch)
 }
 
-// serveSFTP 把 channel 交给 sftp.NewRequestServer + sftp.InMemHandler。
+// serveSFTP 把 channel 交给 sftp.NewRequestServer + 共享的 InMemHandler。
 //
-// InMemHandler 是 github.com/pkg/sftp request-example.go 的导出 FS：
-// 全内存的 key-value 文件系统，支持 read / write / mkdir / rmdir / remove /
-// rename / symlink / readlink / lstat / stat。test 足够用。
+// v0.5.3 关键改动：复用 server.sftpHandlers（4 个 method 引用同一个 root）。
+// 原 v0.5.2 实现每次 channel 调 sftp.InMemHandler() —— 内部 root + files map
+// 是新建的，导致 test 调"第二个 sftp.NewClient"读 server 端文件时拿不到
+// "第一个 client 写入的内容"（file does not exist）。
 func (s *sshIntegrationServer) serveSFTP(ch ssh.Channel) {
-	rs := sftp.NewRequestServer(ch, sftp.InMemHandler())
+	rs := sftp.NewRequestServer(ch, s.sftpHandlers)
 	err := rs.Serve()
 	if err != nil && err != io.EOF {
 		// 用 t.Log 报告（不污染 stderr），不影响 test pass/fail
@@ -676,4 +697,599 @@ func TestConnector_RawClient_Lifecycle(t *testing.T) {
 	if rc2 := conn.RawClient(); rc2 == nil {
 		t.Error("RawClient() after manual Close = nil (should still return cached pointer)")
 	}
+}
+
+// -----------------------------------------------------------------------------
+// sftpclient.Client v0.5.3 写路径集成测试
+// -----------------------------------------------------------------------------
+//
+// 这两个测试通过 in-process SSH server 验证 v0.5.3 新加的 sftpclient.Client
+// 公开方法（Write / UploadFile），用真 *sftp.Client + InMemHandler 跑端到端
+// 流程：写字节 → 读回 → 校验内容一致。
+//
+// 不在 client_test.go 里跑的原因：Client 的 *sftp.Client 字段是
+// 私有（c.sc），mock 不动；本测试不依赖私有字段，只用公开 API（sftpclient.Open
+// 拿 Client → 调 Write/UploadFile），所以放在 sshclient/integration_test.go
+// 共享 in-process server 设施。
+//
+// 不依赖前端 binding：Write / UploadFile 是 sftpclient 层 API，
+// wailsbindings.SftpUploadFile 在另一个文件单独测（unit-level）。
+//
+// 故意不在主 SFTP 测试 (TestConnector_OpenSession_FullSFTPPath) 里加步骤：
+// 那个测试守 v0.1 StdinPipe/Shell 顺序的历史 bug，混合新功能会让失败信号
+// 不清。分两个小测试更易定位。
+
+// TestSftpClient_Write_Integration 验证 sftpclient.Client.Write 端到端：
+//
+//  1. 准备一个测试目录 + 测试文件路径
+//  2. Write 1 KiB 数据
+//  3. 用 sftp.NewClient 直接打开同一个文件读回
+//  4. 内容 + size 校验
+func TestSftpClient_Write_Integration(t *testing.T) {
+	server := newSSHIntegrationServer(t)
+	host, port := server.hostAndPort(t)
+
+	conn, err := New(newTestDeps())
+	if err != nil {
+		t.Fatalf("sshclient.New: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	nc, err := conn.Dial(ctx, connect.DialParams{
+		Host: host,
+		Port: port,
+		User: "test",
+		Auth: connect.PasswordAuth("hunter2"),
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer nc.Close()
+
+	// 拿真 *ssh.Client → sftpclient.Client
+	sshClient := conn.RawClient()
+	if sshClient == nil {
+		t.Fatal("RawClient() = nil after Dial")
+	}
+	sftpWrapper, err := sftpclient.Open(sshClient)
+	if err != nil {
+		t.Fatalf("sftpclient.Open: %v", err)
+	}
+	defer sftpWrapper.Close()
+
+	const testDir = "/v053-write"
+	const testFile = testDir + "/out.bin"
+
+	// 准备：建目录
+	if err := sftpWrapper.Mkdir(testDir); err != nil {
+		t.Fatalf("Mkdir(%q): %v", testDir, err)
+	}
+	t.Cleanup(func() {
+		_ = sftpWrapper.Remove(testFile)
+		_ = sftpWrapper.Remove(testDir)
+	})
+
+	// 1 KiB 写入 payload
+	payload := make([]byte, 1024)
+	for i := range payload {
+		payload[i] = byte(i & 0xff)
+	}
+
+	n, err := sftpWrapper.Write(testFile, payload)
+	if err != nil {
+		t.Fatalf("sftpclient.Client.Write: %v", err)
+	}
+	if n != len(payload) {
+		t.Errorf("Write n = %d, want %d", n, len(payload))
+	}
+
+	// 用 sftp.NewClient 直接读回验证（绕开 sftpclient.Client 自身，
+	// 避免"自己写自己读"的同源循环）
+	rawSftp, err := sftp.NewClient(sshClient)
+	if err != nil {
+		t.Fatalf("sftp.NewClient: %v", err)
+	}
+	defer rawSftp.Close()
+
+	rf, err := rawSftp.OpenFile(testFile, os.O_RDONLY)
+	if err != nil {
+		t.Fatalf("sftp.OpenFile (read) %q: %v", testFile, err)
+	}
+	got, err := io.ReadAll(rf)
+	_ = rf.Close()
+	if err != nil {
+		t.Fatalf("io.ReadAll: %v", err)
+	}
+	if len(got) != len(payload) {
+		t.Fatalf("readback size = %d, want %d", len(got), len(payload))
+	}
+	for i := range payload {
+		if got[i] != payload[i] {
+			t.Errorf("readback byte %d = %d, want %d", i, got[i], payload[i])
+			break
+		}
+	}
+}
+
+// TestSftpClient_Write_Overwrite_Integration 验证 Write 覆盖写语义。
+//
+// 写一次 256B → 写一次 1024B → 读回应该是 1024B 新内容，不是 1280B 拼接。
+// OpenFile flags = O_WRONLY|O_CREATE|O_TRUNC 是覆盖写语义的关键。
+func TestSftpClient_Write_Overwrite_Integration(t *testing.T) {
+	server := newSSHIntegrationServer(t)
+	host, port := server.hostAndPort(t)
+
+	conn, err := New(newTestDeps())
+	if err != nil {
+		t.Fatalf("sshclient.New: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	nc, err := conn.Dial(ctx, connect.DialParams{
+		Host: host,
+		Port: port,
+		User: "test",
+		Auth: connect.PasswordAuth("hunter2"),
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer nc.Close()
+
+	sftpWrapper, err := sftpclient.Open(conn.RawClient())
+	if err != nil {
+		t.Fatalf("sftpclient.Open: %v", err)
+	}
+	defer sftpWrapper.Close()
+
+	const testFile = "/v053-overwrite.txt"
+	t.Cleanup(func() { _ = sftpWrapper.Remove(testFile) })
+
+	// 第一次写：256B
+	first := bytes.Repeat([]byte("A"), 256)
+	if n, err := sftpWrapper.Write(testFile, first); err != nil || n != len(first) {
+		t.Fatalf("first Write: n=%d, err=%v", n, err)
+	}
+
+	// 第二次写：1024B（覆盖）
+	second := bytes.Repeat([]byte("B"), 1024)
+	if n, err := sftpWrapper.Write(testFile, second); err != nil || n != len(second) {
+		t.Fatalf("second Write: n=%d, err=%v", n, err)
+	}
+
+	// 读回：必须 1024B 全是 'B'，不是 1280B 拼接
+	rawSftp, err := sftp.NewClient(conn.RawClient())
+	if err != nil {
+		t.Fatalf("sftp.NewClient: %v", err)
+	}
+	defer rawSftp.Close()
+
+	rf, err := rawSftp.OpenFile(testFile, os.O_RDONLY)
+	if err != nil {
+		t.Fatalf("OpenFile(read) %q: %v", testFile, err)
+	}
+	got, err := io.ReadAll(rf)
+	_ = rf.Close()
+	if err != nil {
+		t.Fatalf("io.ReadAll: %v", err)
+	}
+	if len(got) != len(second) {
+		t.Fatalf("readback size = %d, want %d (覆盖写应该只保留第二次内容)", len(got), len(second))
+	}
+	for i := range second {
+		if got[i] != 'B' {
+			t.Errorf("readback byte %d = %d, want 'B' (=%d)", i, got[i], 'B')
+			break
+		}
+	}
+}
+
+// TestSftpClient_UploadFile_Integration 验证 UploadFile 本地文件 → 远端
+// 分片上传。
+//
+// 1. 准备 256 KiB 本地文件 (内容 = 循环字节)
+// 2. UploadFile 走默认 64 KiB chunkSize → 期望进度回调至少 4 次
+//    (256K / 64K = 4)，最后一次 total == 文件大小
+// 3. 远端读回 → 字节级比对
+func TestSftpClient_UploadFile_Integration(t *testing.T) {
+	server := newSSHIntegrationServer(t)
+	host, port := server.hostAndPort(t)
+
+	conn, err := New(newTestDeps())
+	if err != nil {
+		t.Fatalf("sshclient.New: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	nc, err := conn.Dial(ctx, connect.DialParams{
+		Host: host,
+		Port: port,
+		User: "test",
+		Auth: connect.PasswordAuth("hunter2"),
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer nc.Close()
+
+	sftpWrapper, err := sftpclient.Open(conn.RawClient())
+	if err != nil {
+		t.Fatalf("sftpclient.Open: %v", err)
+	}
+	defer sftpWrapper.Close()
+
+	// 1. 准备本地文件
+	localPath := filepath.Join(t.TempDir(), "upload.bin")
+	const fileSize = 256 * 1024 // 256 KiB → 默认 64 KiB chunk = 4 chunks
+	payload := make([]byte, fileSize)
+	for i := range payload {
+		payload[i] = byte((i * 7) & 0xff) // 伪随机可识别
+	}
+	if err := os.WriteFile(localPath, payload, 0o644); err != nil {
+		t.Fatalf("WriteFile local: %v", err)
+	}
+
+	// 2. UploadFile + 进度回调
+	const testFile = "/v053-upload.bin"
+	t.Cleanup(func() { _ = sftpWrapper.Remove(testFile) })
+
+	var progressCalls int
+	var lastReported int64
+	progress := func(written int64) error {
+		progressCalls++
+		if written < lastReported {
+			t.Errorf("progress went backwards: prev=%d, now=%d", lastReported, written)
+		}
+		lastReported = written
+		return nil
+	}
+
+	if err := sftpWrapper.UploadFile(localPath, testFile, 0, progress); err != nil {
+		t.Fatalf("UploadFile: %v", err)
+	}
+
+	// 进度回调至少 4 次（256K / 64K = 4；最后 partial chunk 也算）
+	if progressCalls < 4 {
+		t.Errorf("progress calls = %d, want >= 4 (256 KiB / 64 KiB chunk)", progressCalls)
+	}
+	// 最后一次进度必须等于文件大小
+	if lastReported != int64(fileSize) {
+		t.Errorf("last progress = %d, want %d", lastReported, fileSize)
+	}
+
+	// 3. 远端读回
+	rawSftp, err := sftp.NewClient(conn.RawClient())
+	if err != nil {
+		t.Fatalf("sftp.NewClient: %v", err)
+	}
+	defer rawSftp.Close()
+
+	rf, err := rawSftp.OpenFile(testFile, os.O_RDONLY)
+	if err != nil {
+		t.Fatalf("OpenFile(read) %q: %v", testFile, err)
+	}
+	got, err := io.ReadAll(rf)
+	_ = rf.Close()
+	if err != nil {
+		t.Fatalf("io.ReadAll: %v", err)
+	}
+	if len(got) != fileSize {
+		t.Fatalf("uploaded file size = %d, want %d", len(got), fileSize)
+	}
+	for i := range payload {
+		if got[i] != payload[i] {
+			t.Errorf("uploaded byte %d = %d, want %d", i, got[i], payload[i])
+			break
+		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// v0.5.3 — sftpclient.Client.List 真实分页（客户端分页协议）
+// -----------------------------------------------------------------------------
+
+// TestSftpClient_List_Pagination 端到端验证 v0.5.3 客户端分页。
+//
+// 流程：
+//  1. 在 InMemFS 上建 25 个 file（file-00 .. file-24）
+//  2. sftpclient.Client.List(path, 10, "") → 10 entries + token1
+//  3. sftpclient.Client.List(path, 10, token1) → 10 entries + token2
+//  4. sftpclient.Client.List(path, 10, token2) → 5 entries + token=""（最后一页）
+//  5. 验证：
+//     - 三页共 25 个 entries，无重复无缺失
+//     - 第三页的 NextToken 为空（无更多）
+//     - entries 名字连续（拼接起来 == 期望的 25 个 file 名集合）
+//  6. 额外：用 token1 调 path 不同的目录 → error
+//  7. 额外：用乱码 token → error
+//
+// 设计要点：
+//   - 复用 sshIntegrationServer + InMemHandler（v0.5.2 写的）
+//   - 走真 sftpclient.Client.List（不是 sftp.ReadDir）—— 是本测试的核心价值
+//   - file 数 25 = 不整除 10：3 页 = 10+10+5，校验最后一页 partial + next token 为空
+func TestSftpClient_List_Pagination(t *testing.T) {
+	server := newSSHIntegrationServer(t)
+	host, port := server.hostAndPort(t)
+
+	conn, err := New(newTestDeps())
+	if err != nil {
+		t.Fatalf("sshclient.New: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	nc, err := conn.Dial(ctx, connect.DialParams{
+		Host: host,
+		Port: port,
+		User: "test",
+		Auth: connect.PasswordAuth("hunter2"),
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer nc.Close()
+
+	sftpWrapper, err := sftpclient.Open(conn.RawClient())
+	if err != nil {
+		t.Fatalf("sftpclient.Open: %v", err)
+	}
+	defer sftpWrapper.Close()
+
+	const testDir = "/v053-paged"
+	const total = 25
+	const pageSize = 10
+
+	// 1. 准备 25 个 file
+	if err := sftpWrapper.Mkdir(testDir); err != nil {
+		t.Fatalf("Mkdir(%q): %v", testDir, err)
+	}
+	t.Cleanup(func() { _ = sftpWrapper.Remove(testDir) })
+
+	// 用 sftp.NewClient 写文件（sftpclient.Client 没有 Write ... 等下，v0.5.3 有了）
+	expectedNames := make(map[string]bool, total)
+	for i := 0; i < total; i++ {
+		name := "file-" + pad2(i) // file-00 .. file-24
+		expectedNames[name] = true
+		// 直接用 sftpclient.Client.Write 写（小文件分页测试不需要 UploadFile）
+		if _, err := sftpWrapper.Write(testDir+"/"+name, []byte(name)); err != nil {
+			t.Fatalf("Write %q: %v", name, err)
+		}
+	}
+
+	// 2. page 1
+	page1, err := sftpWrapper.List(ctx, testDir, pageSize, "")
+	if err != nil {
+		t.Fatalf("List page1: %v", err)
+	}
+	if len(page1.Entries) != pageSize {
+		t.Errorf("page1 size = %d, want %d", len(page1.Entries), pageSize)
+	}
+	if page1.NextToken == "" {
+		t.Error("page1 NextToken is empty, want non-empty (还有更多)")
+	}
+	seen := make(map[string]bool, total)
+	for _, e := range page1.Entries {
+		seen[e.Name] = true
+	}
+
+	// 3. page 2
+	page2, err := sftpWrapper.List(ctx, testDir, pageSize, page1.NextToken)
+	if err != nil {
+		t.Fatalf("List page2: %v", err)
+	}
+	if len(page2.Entries) != pageSize {
+		t.Errorf("page2 size = %d, want %d", len(page2.Entries), pageSize)
+	}
+	if page2.NextToken == "" {
+		t.Error("page2 NextToken is empty, want non-empty (还有最后一页)")
+	}
+	for _, e := range page2.Entries {
+		if seen[e.Name] {
+			t.Errorf("page2 entry %q already seen in page1 (overlap)", e.Name)
+		}
+		seen[e.Name] = true
+	}
+
+	// 4. page 3（最后一页，partial）
+	page3, err := sftpWrapper.List(ctx, testDir, pageSize, page2.NextToken)
+	if err != nil {
+		t.Fatalf("List page3: %v", err)
+	}
+	const expectedLastPage = total - 2*pageSize // 25 - 20 = 5
+	if len(page3.Entries) != expectedLastPage {
+		t.Errorf("page3 size = %d, want %d", len(page3.Entries), expectedLastPage)
+	}
+	if page3.NextToken != "" {
+		t.Errorf("page3 NextToken = %q, want empty (no more pages)", page3.NextToken)
+	}
+	for _, e := range page3.Entries {
+		if seen[e.Name] {
+			t.Errorf("page3 entry %q already seen in earlier page (overlap)", e.Name)
+		}
+		seen[e.Name] = true
+	}
+
+	// 5. 验证三页合并 == 25 个 expected names（无重复无缺失）
+	if len(seen) != total {
+		t.Errorf("total unique names = %d, want %d (missing or extra)", len(seen), total)
+	}
+	for name := range expectedNames {
+		if !seen[name] {
+			t.Errorf("expected name %q not in any page", name)
+		}
+	}
+
+	// 6. token 跨路径：page1.NextToken 是 path testDir 的，调 path testDir+"/other" 必须 error
+	//    先建 /v053-paged/other 目录
+	otherDir := testDir + "/other"
+	if err := sftpWrapper.Mkdir(otherDir); err != nil {
+		t.Fatalf("Mkdir(%q): %v", otherDir, err)
+	}
+	if _, err := sftpWrapper.List(ctx, otherDir, pageSize, page1.NextToken); err == nil {
+		t.Error("List with token from different path: expected error, got nil")
+	}
+
+	// 7. 乱码 token 必须 error
+	if _, err := sftpWrapper.List(ctx, testDir, pageSize, "this-is-not-a-valid-token!!!"); err == nil {
+		t.Error("List with garbage token: expected error, got nil")
+	}
+}
+
+// TestSftpClient_List_PageSizeZeroAndLarge 覆盖 pageSize 边界：
+//   - pageSize=0 → 用 defaultPageSize (200)
+//   - pageSize > maxPageSize (1000) → 截断到 1000
+func TestSftpClient_List_PageSizeZeroAndLarge(t *testing.T) {
+	server := newSSHIntegrationServer(t)
+	host, port := server.hostAndPort(t)
+
+	conn, err := New(newTestDeps())
+	if err != nil {
+		t.Fatalf("sshclient.New: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	nc, err := conn.Dial(ctx, connect.DialParams{
+		Host: host,
+		Port: port,
+		User: "test",
+		Auth: connect.PasswordAuth("hunter2"),
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer nc.Close()
+
+	sftpWrapper, err := sftpclient.Open(conn.RawClient())
+	if err != nil {
+		t.Fatalf("sftpclient.Open: %v", err)
+	}
+	defer sftpWrapper.Close()
+
+	const testDir = "/v053-pagesize"
+	if err := sftpWrapper.Mkdir(testDir); err != nil {
+		t.Fatalf("Mkdir(%q): %v", testDir, err)
+	}
+	t.Cleanup(func() { _ = sftpWrapper.Remove(testDir) })
+
+	// 3 个 file
+	for i := 0; i < 3; i++ {
+		name := "f-" + pad2(i)
+		if _, err := sftpWrapper.Write(testDir+"/"+name, []byte(name)); err != nil {
+			t.Fatalf("Write %q: %v", name, err)
+		}
+	}
+
+	// pageSize=0：应当用 default (200)，3 个 entries 一次拿完，token=""
+	page, err := sftpWrapper.List(ctx, testDir, 0, "")
+	if err != nil {
+		t.Fatalf("List pageSize=0: %v", err)
+	}
+	if len(page.Entries) != 3 {
+		t.Errorf("pageSize=0: size = %d, want 3 (default 200 > 3 entries)", len(page.Entries))
+	}
+	if page.NextToken != "" {
+		t.Errorf("pageSize=0: NextToken = %q, want empty (all in one page)", page.NextToken)
+	}
+
+	// pageSize=99999：截断到 1000，3 entries 一次拿完
+	page, err = sftpWrapper.List(ctx, testDir, 99999, "")
+	if err != nil {
+		t.Fatalf("List pageSize=99999: %v", err)
+	}
+	if len(page.Entries) != 3 {
+		t.Errorf("pageSize=99999: size = %d, want 3 (truncated to 1000)", len(page.Entries))
+	}
+	if page.NextToken != "" {
+		t.Errorf("pageSize=99999: NextToken = %q, want empty", page.NextToken)
+	}
+}
+
+// TestSftpClient_List_WithPageSizeOption 验证 WithPageSize option 真的把
+// defaultPageSize 改了。
+//
+// 1. Open(... WithPageSize(50))
+// 2. List(pageSize=0) → 应当用 50 作为 pageSize，不是默认 200
+//    - 用 30 个 entries 验证：page 1 = 30 个一次拿完（30 < 50），token=""
+func TestSftpClient_List_WithPageSizeOption(t *testing.T) {
+	server := newSSHIntegrationServer(t)
+	host, port := server.hostAndPort(t)
+
+	conn, err := New(newTestDeps())
+	if err != nil {
+		t.Fatalf("sshclient.New: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	nc, err := conn.Dial(ctx, connect.DialParams{
+		Host: host,
+		Port: port,
+		User: "test",
+		Auth: connect.PasswordAuth("hunter2"),
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer nc.Close()
+
+	// 关键：注入 WithPageSize(50)
+	sftpWrapper, err := sftpclient.Open(conn.RawClient(), sftpclient.WithPageSize(50))
+	if err != nil {
+		t.Fatalf("sftpclient.Open with WithPageSize(50): %v", err)
+	}
+	defer sftpWrapper.Close()
+
+	const testDir = "/v053-withpagesize"
+	if err := sftpWrapper.Mkdir(testDir); err != nil {
+		t.Fatalf("Mkdir(%q): %v", testDir, err)
+	}
+	t.Cleanup(func() { _ = sftpWrapper.Remove(testDir) })
+
+	// 写 30 个 file（30 > 50 ? 不，30 < 50，所以 1 页拿完）—— 改成 60
+	const total = 60
+	for i := 0; i < total; i++ {
+		name := "x-" + pad2(i)
+		if _, err := sftpWrapper.Write(testDir+"/"+name, []byte(name)); err != nil {
+			t.Fatalf("Write %q: %v", name, err)
+		}
+	}
+
+	// List(pageSize=0) → 应当用 50：60 entries 拆 50+10 → page1=50, page2=10
+	page1, err := sftpWrapper.List(ctx, testDir, 0, "")
+	if err != nil {
+		t.Fatalf("List page1: %v", err)
+	}
+	if len(page1.Entries) != 50 {
+		t.Errorf("WithPageSize(50) + pageSize=0: page1 size = %d, want 50 (证明 defaultPageSize 真的改了)", len(page1.Entries))
+	}
+	if page1.NextToken == "" {
+		t.Error("page1 NextToken is empty, want non-empty (60 > 50)")
+	}
+	page2, err := sftpWrapper.List(ctx, testDir, 0, page1.NextToken)
+	if err != nil {
+		t.Fatalf("List page2: %v", err)
+	}
+	if len(page2.Entries) != 10 {
+		t.Errorf("page2 size = %d, want 10", len(page2.Entries))
+	}
+	if page2.NextToken != "" {
+		t.Errorf("page2 NextToken = %q, want empty", page2.NextToken)
+	}
+}
+
+// pad2 把 i 补零到 2 位（testDir/file-00 .. file-24）。
+func pad2(i int) string {
+	if i < 10 {
+		return "0" + string(rune('0'+i))
+	}
+	return string(rune('0'+i/10)) + string(rune('0'+i%10))
 }

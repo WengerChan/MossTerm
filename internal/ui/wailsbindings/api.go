@@ -377,3 +377,43 @@ func (a *App) SftpWrite(ctx context.Context, sessionID, path string, data []byte
 	}
 	return nil
 }
+
+// SftpUploadFile 把前端的 []byte 写到远端 path（覆盖写），返回写入字节数。
+//
+// v0.5.3 新增：配合 SftpBrowser 的 drag-drop 上传功能。
+//
+// 调用栈：
+//  1. 前端 drag-drop local file → FileReader.readAsArrayBuffer → Uint8Array
+//  2. App.SftpUploadFile(sessionID, remotePath, content) → 本方法
+//  3. a.core.SftpClient(sessionID) 拿 sftpclient.Client（懒加载）
+//  4. client.Write(remotePath, content) → 远端 sftp.Write
+//  5. 返回写入字节数
+//
+// 参数约定：
+//   - sessionID：必须是已 Open 且 Established 的 session 的 ID
+//   - remotePath：远端绝对路径
+//   - content：完整文件内容，前端 Uint8Array → []byte
+//
+// 限制：v0.5.3 一次性把整个文件传到后端（前端先 readAsArrayBuffer 读进内存）。
+// **前端必须在调用前校验文件大小**（推荐 ≤ 100 MiB）—— SftpBrowser
+// 已经把 > 100 MiB 的文件直接拒绝 + 提示用户。
+// 大文件分片 streaming upload 留 v0.6+。
+//
+// 与 SftpWrite 的区别：
+//   - SftpWrite：写编辑器保存的小文件（通常 < 1 MiB），通用
+//   - SftpUploadFile：drag-drop 整文件上传（可能几十 MB），专属路径
+//     返回写入字节数（让前端可以做更详细的 toast / 进度反馈）
+//
+// 错误：SftpList 同款 + sftpclient.Write 内部错误（远端权限 / 磁盘满 /
+// path 是目录）→ 一律 fmt.Errorf("wailsbindings.SftpUploadFile: %w", err) 包装。
+func (a *App) SftpUploadFile(ctx context.Context, sessionID, remotePath string, content []byte) (int, error) {
+	client, err := a.core.SftpClient(session.ID(sessionID))
+	if err != nil {
+		return 0, fmt.Errorf("wailsbindings.SftpUploadFile: %w", err)
+	}
+	n, err := client.Write(remotePath, content)
+	if err != nil {
+		return n, fmt.Errorf("wailsbindings.SftpUploadFile: %w", err)
+	}
+	return n, nil
+}

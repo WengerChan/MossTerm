@@ -25,22 +25,34 @@ import (
 type Client struct {
 	sc        *sftp.Client
 	sshClient *ssh.Client
+
+	// pageCache 是 v0.5.3 客户端分页缓存（详见 pagecache.go）。
+	// 懒构造：首次 List 时按需 put。
+	// Close 时 clear。
+	pageCache *pageCache
+
+	// defaultPageSize 是 v0.5.3 WithPageSize 真正生效：覆盖 List 默认 200。
+	// 0 表示用默认 200；>0 表示用 client 级默认值（pageSize 参数仍可覆盖）。
+	defaultPageSize int
 }
 
 // Option 配置 Client 行为。
 type Option func(*Client)
 
-// WithPageSize 设置大目录分页的默认页大小（条目数）。
+// WithPageSize 设置 List 的默认页大小（条目数）。
 //
 // v0.5.0 暂未实现真正的分页：List 一次性返回全量结果，本选项保留作为
 // 后续 v0.5.1+ 接入分页协议时的占位。当前调用是安全的 no-op。
+//
+// v0.5.3 起真正生效：覆盖 List 的默认 200。List 调用时如果 pageSize <= 0
+// 且 client 配了 WithPageSize，用 n 作为默认。pageSize > 0 仍以 pageSize 为准。
 func WithPageSize(n int) Option {
-	return func(c *Client) { _ = n /* TODO(v0.5.1+): store and honor in List */ }
+	return func(c *Client) { c.defaultPageSize = n }
 }
 
 // Open 在已有 *ssh.Client 上打开 SFTP subsystem。
 //
-// opts 用于调整 Client 行为（当前仅 WithPageSize 占位）。nil sshClient
+// opts 用于调整 Client 行为（当前仅 WithPageSize）。nil sshClient
 // 直接返回错误，避免后续方法在 nil receiver 上 panic。
 func Open(sshClient *ssh.Client, opts ...Option) (*Client, error) {
 	if sshClient == nil {
@@ -53,6 +65,7 @@ func Open(sshClient *ssh.Client, opts ...Option) (*Client, error) {
 	c := &Client{
 		sc:        sftpCli,
 		sshClient: sshClient,
+		pageCache: newPageCache(),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -60,37 +73,80 @@ func Open(sshClient *ssh.Client, opts ...Option) (*Client, error) {
 	return c, nil
 }
 
-// List 列出一个目录的分页结果。
+// List 列出一个目录的分页结果（v0.5.3 客户端分页）。
 //
-// pageSize <= 0 时使用默认值（200）。
-// pageToken 由上一次 List 返回；首次传空。
+// pageSize <= 0 用默认（client.WithPageSize 配置 > 0 用配置的，否则 200）。
+// pageToken == "" 走第一次（ReadDir 全量 + 切第一页）。
+// pageToken != "" 走后续（decode token → 切缓存）。
 //
-// v0.5.0 简化：pkg/sftp 的 ReadDir 不支持分页，List 一次性返回全量条目，
-// pageSize / NextToken 仅作接口占位（NextToken 恒为空）。后续版本接入
-// 真实分页协议时此方法签名保持不变，行为升级。
+// 返回的 ListPage.NextToken：
+//   - 还有更多页：encodeToken(path, nextOffset)
+//   - 最后一页：""（空字符串）
+//
+// 错误：
+//   - token decode 失败 / path 不匹配 / offset 越界 → fmt.Errorf("..." + ErrInvalidPageToken)
+//   - ReadDir 失败 → fmt.Errorf("sftpclient.List: ReadDir %q: %w", ...)
+//   - client closed → "sftpclient.List: client closed"
 //
 // ctx 当前未使用（SFTP 协议无 cancel 机制）；保留参数是为对齐
-// 上层 ctx-aware 调用约定，方便 v0.5.1+ 接 ReadDir 分页时无需改签名。
+// 上层 ctx-aware 调用约定。
 func (c *Client) List(ctx context.Context, pathArg string, pageSize int, pageToken string) (ListPage, error) {
 	if c.sc == nil {
 		return ListPage{}, errors.New("sftpclient.List: client closed")
 	}
 	_ = ctx
-	_ = pageToken
+
 	if pageSize <= 0 {
-		pageSize = 200
+		pageSize = c.defaultPageSize
+		if pageSize <= 0 {
+			pageSize = 200
+		}
 	}
-	entries, err := c.sc.ReadDir(pathArg)
-	if err != nil {
-		return ListPage{}, fmt.Errorf("sftpclient.List: ReadDir %q: %w", pathArg, err)
+	// 防御性上限：单页 > 1000 限制到 1000
+	if pageSize > 1000 {
+		pageSize = 1000
 	}
-	out := make([]Entry, 0, len(entries))
-	for _, fi := range entries {
-		out = append(out, entryFromFileInfo(fi, pathArg))
+
+	// 1. 解析 pageToken → 起始 offset
+	offset := 0
+	if pageToken != "" {
+		tokPath, tokOffset, err := decodeToken(pageToken)
+		if err != nil {
+			return ListPage{}, fmt.Errorf("sftpclient.List: %w", err)
+		}
+		if tokPath != pathArg {
+			return ListPage{}, fmt.Errorf("sftpclient.List: %w (token path %q != request path %q)", ErrInvalidPageToken, tokPath, pathArg)
+		}
+		offset = tokOffset
 	}
+
+	// 2. 拿全量 entries（cache 命中即用；miss 才 ReadDir）
+	state, ok := c.pageCache.get(pathArg)
+	if !ok {
+		files, err := c.sc.ReadDir(pathArg)
+		if err != nil {
+			return ListPage{}, fmt.Errorf("sftpclient.List: ReadDir %q: %w", pathArg, err)
+		}
+		entries := make([]Entry, 0, len(files))
+		for _, fi := range files {
+			entries = append(entries, entryFromFileInfo(fi, pathArg))
+		}
+		state = pageState{entries: entries}
+		c.pageCache.put(pathArg, state)
+	}
+
+	// 3. 切页
+	page, nextOffset := slicePage(state.entries, offset, pageSize)
+
+	// 4. 算 nextToken
+	nextToken := ""
+	if nextOffset >= 0 {
+		nextToken = encodeToken(pathArg, nextOffset)
+	}
+
 	return ListPage{
-		Entries:   out,
-		NextToken: "", // 简化：v0.5.0 一次性返回
+		Entries:   page,
+		NextToken: nextToken,
 	}, nil
 }
 
@@ -182,13 +238,96 @@ func (c *Client) Rename(o, n string) error {
 // Close 关闭底层 SFTP 连接。
 //
 // 幂等：多次调用安全。Close 之后所有其它方法都会返回 "client closed" 错误。
+// v0.5.3 起 Close 同时清空 pageCache 释放内存。
 func (c *Client) Close() error {
 	if c.sc == nil {
 		return nil
 	}
 	err := c.sc.Close()
 	c.sc = nil
+	if c.pageCache != nil {
+		c.pageCache.clear()
+	}
 	return err
+}
+
+// Write 写字节到远端 path（覆盖写）。
+//
+// v0.5.3 新增：把 wailsbindings.SftpUploadFile 的需求在 sftpclient 层提供
+// 公开方法，避免 wailsbindings 跨包访问 *sftp.Client 的私有字段。
+//
+// 返回写入字节数 + 错误。错误时已写入字节数仍返回（best-effort）。
+func (c *Client) Write(path string, data []byte) (int, error) {
+	if c.sc == nil {
+		return 0, errors.New("sftpclient.Write: client closed")
+	}
+	rf, err := c.sc.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		return 0, fmt.Errorf("sftpclient.Write: open %q: %w", path, err)
+	}
+	defer rf.Close()
+	n, err := rf.Write(data)
+	if err != nil {
+		return n, fmt.Errorf("sftpclient.Write: write %q: %w", path, err)
+	}
+	return n, nil
+}
+
+// UploadFile 把本地文件分片上传到远端 path。
+//
+// chunkSize <= 0 用默认 64 KiB（x/crypto 推荐的 SFTP 分片大小）。
+// progress 回调每完成一个 chunk 调一次（参数：已传字节数；返回非 nil error
+// 可取消上传）。
+//
+// v0.5.3 简化：
+//   - 单 goroutine 顺序分片，不并行
+//   - 错误时已传部分**不**回滚（best-effort，调用方负责清理）
+//   - 进度回调高频（每 64 KiB 一次），调用方负责节流
+//
+// 大文件（>100MB）+ 并发上传留给 v0.6+ streaming upload。
+func (c *Client) UploadFile(localPath, remotePath string, chunkSize int, progress func(written int64) error) error {
+	if c.sc == nil {
+		return errors.New("sftpclient.UploadFile: client closed")
+	}
+	lf, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("sftpclient.UploadFile: open local: %w", err)
+	}
+	defer lf.Close()
+
+	if chunkSize <= 0 {
+		chunkSize = 64 * 1024
+	}
+
+	rf, err := c.sc.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		return fmt.Errorf("sftpclient.UploadFile: open remote: %w", err)
+	}
+	defer rf.Close()
+
+	buf := make([]byte, chunkSize)
+	var total int64
+	for {
+		n, rerr := lf.Read(buf)
+		if n > 0 {
+			if _, werr := rf.Write(buf[:n]); werr != nil {
+				return fmt.Errorf("sftpclient.UploadFile: write: %w", werr)
+			}
+			total += int64(n)
+			if progress != nil {
+				if perr := progress(total); perr != nil {
+					return perr
+				}
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return fmt.Errorf("sftpclient.UploadFile: read local: %w", rerr)
+		}
+	}
+	return nil
 }
 
 // entryFromFileInfo 把 sftp/os 的 os.FileInfo 转换成 sftpclient.Entry。

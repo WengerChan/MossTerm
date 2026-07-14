@@ -202,6 +202,12 @@ export function SftpBrowser({ open, onClose, sessionID }: SftpBrowserProps): JSX
   // 文本查看器
   const [viewer, setViewer] = useState<{ name: string; content: string; binary: boolean; size: number } | null>(null);
 
+  // drag-drop 状态（v0.5.3 新增）
+  // - isDragOver：拖拽悬停在浏览器上时为 true，用于视觉反馈
+  // - 拖拽文件松手时调 App.SftpUploadFile 写到当前 path
+  // 限制：v0.5.3 不分片，前端先校验 ≤ 100 MiB（> 100 MiB 拒绝 + 提示）
+  const [isDragOver, setIsDragOver] = useState(false);
+
   // 用于防止 stale 响应：每次 cd/refresh 分配一个 token，回调时校验。
   const reqTokenRef = useRef(0);
 
@@ -216,6 +222,7 @@ export function SftpBrowser({ open, onClose, sessionID }: SftpBrowserProps): JSX
       setError(null);
       setDialog(null);
       setViewer(null);
+      setIsDragOver(false);
     }
   }, [open]);
 
@@ -227,6 +234,7 @@ export function SftpBrowser({ open, onClose, sessionID }: SftpBrowserProps): JSX
     setError(null);
     setDialog(null);
     setViewer(null);
+    setIsDragOver(false);
   }, [sessionID]);
 
   // 初始 / 路径变化时拉取
@@ -404,6 +412,87 @@ export function SftpBrowser({ open, onClose, sessionID }: SftpBrowserProps): JSX
     }
   }, [dialog, sessionID, path, listDir, pushToast]);
 
+  // ---------- Drag-Drop 上传（v0.5.3 新增） ----------
+  //
+  // UX 流程：
+  //   1. 用户从 Finder/Explorer 拖一个或多个文件到 SFTP 浏览器面板上
+  //   2. dragover 时面板亮起 accent 边框（视觉提示"会接住"）
+  //   3. 松手（drop）→ handleDrop 拿到 File 列表
+  //   4. 对每个 file：
+  //      a. 大小检查：> 100 MiB 直接 setError 拒绝（v0.5.3 一次性 readAsArrayBuffer）
+  //      b. f.arrayBuffer() → Uint8Array
+  //      c. 远端路径 = joinPath(当前 path, file.name)
+  //      d. setLoading("Uploading <name>...") → App.SftpUploadFile(sessionID, remote, content)
+  //      e. 成功继续下一个；失败 setError 跳到下一个（不让一个文件拖累全部）
+  //   5. 全部完成后 listDir 刷新列表，看到新文件
+  //
+  // 设计决策（vs 其它备选）：
+  //   - 多文件支持：用户拖多个一起传，每个独立 try/catch，单文件失败不影响其他
+  //   - 100 MiB 限制：v0.5.3 一次性 readAsArrayBuffer 读进内存；超出后 UI 冻结
+  //     且 Wails Uint8Array 序列化压力陡增；v0.6+ streaming upload 放开限制
+  //   - 不做进度条：SftpUploadFile 一次性同步返回（没有 progress 事件）；
+  //     用 setLoading("Uploading ...") 做轻量提示
+  //   - 覆盖写：调的是 client.Write（O_WRONLY|O_CREATE|O_TRUNC），同名文件会覆盖
+  //     —— 与前端"上传"的语义一致（不弹确认；想要重命名是 v0.6+ 范围）
+
+  const MAX_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MiB
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    // 仅在有 file 数据时亮起；普通文本拖拽不亮
+    if (e.dataTransfer.types.includes("Files")) {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsDragOver(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    // 只在真正"离开浏览器"时清状态。dragleave 会在进入子元素时
+    // 触发（事件冒泡），所以检查 relatedTarget 是否还在 panel 内。
+    e.preventDefault();
+    e.stopPropagation();
+    const panel = e.currentTarget as HTMLElement;
+    const next = e.relatedTarget as Node | null;
+    if (next && panel.contains(next)) return;
+    setIsDragOver(false);
+  }, []);
+
+  const handleDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsDragOver(false);
+
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length === 0) return;
+      if (!sessionID) return;
+
+      for (const f of files) {
+        // 1. 大小检查
+        if (f.size > MAX_UPLOAD_BYTES) {
+          setError(`${f.name} 超过 100 MiB，v0.5.3 不支持大文件上传（v0.6+ streaming）`);
+          continue;
+        }
+        // 2. 读字节 + 上传
+        try {
+          setLoading(`Uploading ${f.name}...`);
+          const buf = await f.arrayBuffer();
+          const content = new Uint8Array(buf);
+          const remotePath = joinPath(path, f.name);
+          await App.SftpUploadFile(sessionID, remotePath, content);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.error(`[SftpBrowser] Upload ${f.name} failed: ${msg}`);
+          setError(`Upload ${f.name} 失败：${msg}`);
+        }
+      }
+      // 3. 刷列表
+      setLoading(null);
+      void listDir(path);
+    },
+    [sessionID, path, listDir],
+  );
+
   // ---------- Derived ----------
 
   const sorted = useMemo(() => {
@@ -450,7 +539,14 @@ export function SftpBrowser({ open, onClose, sessionID }: SftpBrowserProps): JSX
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="relative flex h-[640px] max-h-[90vh] w-[920px] max-w-[95vw] flex-col overflow-hidden rounded-lg border border-moss-border bg-moss-surface shadow-2xl"
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        className={clsx(
+          "relative flex h-[640px] max-h-[90vh] w-[920px] max-w-[95vw] flex-col overflow-hidden rounded-lg border bg-moss-surface shadow-2xl transition-colors",
+          isDragOver ? "border-accent ring-4 ring-accent/40" : "border-moss-border",
+        )}
+        data-testid="sftp-browser-panel"
       >
         {/* ===== Header ===== */}
         <div className="flex items-center justify-between border-b border-moss-border px-4 py-2.5">
