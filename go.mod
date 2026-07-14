@@ -1,6 +1,6 @@
 module github.com/mossterm/mossterm
 
-go 1.22.0
+go 1.23.0
 
 require (
 	github.com/BurntSushi/toml v1.3.2
@@ -10,7 +10,7 @@ require (
 	github.com/pkg/sftp v1.13.6
 	github.com/wailsapp/wails/v2 v2.8.1
 	github.com/zalando/go-keyring v0.2.4
-	golang.org/x/crypto v0.22.0
+	golang.org/x/crypto v0.31.0
 )
 
 require (
@@ -38,7 +38,7 @@ require (
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
-	golang.org/x/net v0.24.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
-	golang.org/x/text v0.22.0 // indirect
+	golang.org/x/net v0.33.0 // indirect
+	golang.org/x/sys v0.34.0 // indirect
+	golang.org/x/text v0.27.0 // indirect
 )

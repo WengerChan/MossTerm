@@ -15,6 +15,30 @@
 - 基础设施文件：Makefile、CI、配置模板、贡献指南、行为准则
 - GitHub Actions CI 矩阵：ubuntu / macOS / windows × lint / test / build
 
+### v0.5.8 · SFTP 集成到 Pane 树
+
+**目标**：把 v0.5.1 的独立 SFTP modal 嵌入 Pane 树，形成"左 SSH terminal / 右 SFTP browser"双栏布局。
+
+**已完成**：
+- Pane 类型加 `kind: 'terminal' | 'sftp' | 'split'` 显式分流（替代 `split === null` 隐式判 leaf）
+- 算法层抽离 `frontend/src/components/tabs/paneTree.ts`（pure functions，可单测）
+- `SftpBrowserContent` 业务层抽离，由 `SftpBrowser`（modal wrapper）+ `SftpPaneView`（pane wrapper）共享
+- 顺手修 v0.5.0 B 的 `closePaneFromTree` 嵌套 split 关闭 3+ child bug
+- 22 个 paneTree 算法单测（Node `node:test` + `--experimental-strip-types`，零新依赖）
+- 零后端改动（SFTP bindings v0.5.1 已齐全）
+
+### v0.5.9 · SFTP 文件预览
+
+**目标**：双击 SFTP 文件弹 PreviewPanel，零下载预览图片 / PDF / 文本 / 二进制 / 超大文件。
+
+**已完成**：
+- 三层大文件保护：后端 `ReadFileChunk` 50 MiB cap + `ClassifyPreview` 优先级检查 + 前端 `routePreviewKind` 二次校验
+- 分类优先级：size cap → magic (PNG/JPEG/GIF/WebP/PDF) → mime (`net/http.DetectContentType`) → 扩展名白名单 → 兜底 binary
+- 3 个新 binding：`SftpReadFileChunk` / `SftpStatFile` / `SftpGetFileMetadata`
+- PDF 走 best-effort 文本提取（不引 pdf.js）：正则提取 header / page count / title / Tj 片段
+- `PreviewPanel` 覆盖式（absolute inset-0 z-20），Esc / backdrop / X 三种关闭
+- 28 个后端单测 + 28 个前端单测
+
 ### v0.5.10 · SFTP streaming upload（分片 + 进度 + 断点续传）
 
 **目标**：把 v0.5.3 的"一次性 readAsArrayBuffer → SftpUploadFile"
@@ -250,5 +274,16 @@
 ### Security
 - 修复了漏洞 CVE-XXXX-XXXX
 ```
+
+### v0.5.11 · x/crypto v0.22 → v0.31 升级
+
+**目标**：v0.5.1 时代锁 v0.22.0 是为了规避 v0.33+ 的"argon2 类型移除 + ssh.NewClient 拆两步"破坏性变更。
+v0.31.0 是最后一个保留旧 API 的稳定版本 —— 升 v0.31 拿上游安全补丁，不引入 v0.33+ 破坏性变更。
+
+**已完成**：
+- `go.mod`：`golang.org/x/crypto v0.22.0` → `v0.31.0`
+- 传递依赖：`x/net v0.24 → v0.33` / `x/sys v0.19 → v0.34` / `x/text v0.14 → v0.27`（由 `hashicorp/golang-lru/v2 v2.0.7` 触发，`// indirect`）
+- **零代码改动** —— MossTerm 全程用 `error` 语义 `HostKeyCallback`，argon2 暂未使用，`ssh.NewClient` 还是一步到位
+- 全套回归：`go vet` 0 / `go test` 8 packages ok / `go test -race` clean
 
 [Unreleased]: https://github.com/mossterm/mossterm/compare/main...HEAD
