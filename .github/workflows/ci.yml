@@ -64,6 +64,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: go mod download
         run: go mod download
@@ -92,12 +93,10 @@ jobs:
           govulncheck ./...
 
       # —— 前端三件套：lint / typecheck / build，全部 fail-fast ——
-      # 注：v0.5.4 时 frontend/ 还没有 package-lock.json（v0.0 占位），
-      # 用 npm install 而不是 npm ci；lockfile 后续 vendor 后改为 npm ci。
       - name: 前端依赖安装
         run: |
           cd frontend
-          npm install
+          npm ci
 
       - name: 前端 typecheck
         run: |

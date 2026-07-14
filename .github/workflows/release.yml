@@ -85,6 +85,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: 安装 Linux 桌面依赖 (gtk3 + webkit)
         if: runner.os == 'Linux'
@@ -101,7 +102,7 @@ jobs:
       - name: 前端依赖安装
         run: |
           cd frontend
-          npm install
+          npm ci
 
       - name: 解析发布版本
         id: version
