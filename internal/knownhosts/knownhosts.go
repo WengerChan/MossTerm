@@ -3,15 +3,19 @@
 // 设计要点：
 //   - 文件格式与 OpenSSH known_hosts 完全兼容（`~/.ssh/known_hosts` 同款格式）
 //   - 路径默认 ~/.config/mossterm/known_hosts（与 OpenSSH 不共用，便于隔离）
-//   - 智能 HostKeyCallback：未找到时自动信任并写入；host key 改变时拒绝
+//   - 智能 HostKeyCallback：未找到时弹 GUI 询问用户；host key 改变时拒绝
 //   - 线程安全：内部用 sync.RWMutex 保护
 //   - v0.2.0b 起支持 OpenSSH 完整 host pattern：通配符、端口、IP 范围
+//   - v0.5.0 起支持"首次信任"UI 对话框：未知 host key 经 Wails 事件总线
+//     推给前端，前端 modal 让用户选 trust/reject
 //
 // 安全语义：
-//   - "未找到"（new host）→ 自动 Add 写入文件 + 放行（v0.1.3 简化策略）
 //   - "找到且匹配" → 放行
 //   - "找到但不匹配"（host key 改变）→ 拒绝（这是 MITM 攻击的信号）
-//   - v0.2 计划加"首次信任"UI 对话框，让用户在 GUI 确认
+//   - "未找到"（new host）→
+//     - v0.5.0+：经 EventEmitter 推给前端，用户 trust 后 Add 写入 + 放行；
+//       reject 或 60s 超时则拒绝。
+//     - 兜底（无 emitter / 单元测试）：自动 Add 写入 + 放行（v0.1.3 行为）
 //
 // 与 sshclient 的关系：
 //   connect.Deps 加 KnownHosts *Manager 字段
@@ -21,13 +25,15 @@
 // 为什么不用 x/crypto/ssh/knownhosts 标准库：
 //   那个包只导出 New(files) (HostKeyCallback, error)，不导出 DB 类型，
 //   无法在 callback 命中"未找到"分支时手动 Add。我们的需求是
-//   "首次连接自动信任 + 持久化"，所以需要自实现匹配算法。
+//   "首次连接询问用户 + 持久化"，所以需要自实现匹配算法。
 //   匹配规则源自 OpenSSH addrmatch.c（与标准库 wildcardMatch 等价实现）。
 package knownhosts
 
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -36,9 +42,68 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
+
+// TrustRequestTimeout 是 HostKeyCallback 等待用户响应的最大时长。
+//
+// 超时后 HostKeyCallback 返回 error（"user trust timeout"），SSH 握手失败，
+// 不会自动信任。60s 与主流 SSH 客户端（OpenSSH 的 StrictHostKeyChecking=ask
+// 无超时，PuTTY 默认 10s）取折中：足够让用户阅读指纹 + 决定，又不会因误点
+// modal 而永久挂起 SSH 连接。
+//
+// 暴露为 var（非 const）便于单元测试覆盖；生产代码不应改写。
+var TrustRequestTimeout = 60 * time.Second
+
+// replyChannelCapacity 是 Manager 内部 trustReplyCh 的容量。
+//
+// 容量为 1：保证 ReplyTrust 在没有挂起请求时也能立即返回（不阻塞），
+// 而不会无限堆积过期 reply。多个并发 SSH 连接同时请求 trust 时只有第一
+// 个会拿到 reply，其余会 timeout —— 这是 v0.5.0 的已知限制，参见
+// HostKeyCallback 内的注释。
+const replyChannelCapacity = 1
+
+// TrustRequest 是推给前端的"是否信任此 host"请求。
+//
+// 字段说明：
+//   - ID：唯一请求 ID，用于 ReplyTrust 时把决策路由回正确的 SSH 连接。
+//   - Host：远端 host（含端口，SSH client 传的原始字符串）。
+//   - KeyType：ssh.PublicKey.Type()（"ssh-ed25519" / "ssh-rsa" / "ecdsa-sha2-nistp256" 等）。
+//   - Fingerprint：完整 base64 key 的前 16 字符（短哈希），供 modal 摘要展示。
+//   - FullKey：完整 base64 编码的 key，供"高级 / 复制"按钮展开。
+type TrustRequest struct {
+	ID          string `json:"id"`
+	Host        string `json:"host"`
+	KeyType     string `json:"keyType"`
+	Fingerprint string `json:"fingerprint"`
+	FullKey     string `json:"fullKey"`
+}
+
+// TrustReply 是前端回传的决策。
+//
+// 字段说明：
+//   - ID：对应 TrustRequest.ID；Manager 检查匹配后才会采纳。
+//   - Action："trust" | "reject" | 其他（视为 reject）。
+//   - Err：保留字段，未来用于前端上报错误（如 modal 渲染失败）；v0.5.0 暂不使用。
+type TrustReply struct {
+	ID     string `json:"id"`
+	Action string `json:"action"`
+	Err    string `json:"err,omitempty"`
+}
+
+// EventEmitter 是 known_hosts 用来推送"信任请求"到前端的轻量接口。
+//
+// 设计目的：known_hosts 包不直接 import wailsruntime（避免循环依赖，
+// 同时让核心层可以独立单测）。实现由 main.go 或 internal/app 注入。
+//
+// EmitTrustRequest 应该**非阻塞**：把请求 emit 到 Wails 事件总线后立即返回；
+// 实际的等待用户响应通过 Manager.ReplyTrust 走另一条路径。
+// 如果实现需要"等待"语义，应在内部开 goroutine 处理并把结果回灌到 replyCh。
+type EventEmitter interface {
+	EmitTrustRequest(ctx context.Context, req TrustRequest)
+}
 
 // Manager 是 known_hosts 文件的运行时句柄。
 //
@@ -51,12 +116,21 @@ import (
 //  3. 遍历 entries，对每个 entry 用 OpenSSH 通配符规则逐 pattern 比对
 //  4. 找到 pattern match + key match → 放行
 //  5. 找到 pattern match + key mismatch → 拒绝（MITM）
-//  6. 都没找到 → 自动 Add 写入文件 + 放行
+//  6. 都没找到 → 走"首次信任"路径（v0.5.0+）：
+//     a) emitter 非 nil → EmitTrustRequest 给前端，等用户响应
+//     b) emitter 为 nil → 自动 Add 写入文件 + 放行（v0.1.3 兜底行为）
 type Manager struct {
 	path string
 	mu   sync.RWMutex
 	// entries 是文件按行解析的列表，顺序与文件一致。
 	entries []entry
+
+	// emitter 是 v0.5.0+ 首次信任 GUI 通道。nil 时退化到 v0.1.3 自动信任。
+	emitter EventEmitter
+	// trustReplyCh 接收前端回传的 TrustReply（wailsbinding TrustHost 调 ReplyTrust 写入）。
+	// 容量为 1，避免 ReplyTrust 在无挂起请求时阻塞，也避免过期 reply 堆积。
+	// channel 自身的 send/receive 自带 happens-before 保证，无需额外锁。
+	trustReplyCh chan TrustReply
 }
 
 // entry 对应 known_hosts 文件的一行。
@@ -93,7 +167,28 @@ type addr struct {
 // 单行格式错误采用宽容策略（跳过该行），保证一个坏行不会阻塞整个文件加载。
 //
 // path 为空字符串时返回 error（不提供默认路径，强制调用方显式选择）。
+//
+// 该构造器**不**启用首次信任 GUI 询问 —— 未知 host 走 v0.1.3 的"自动
+// 信任并写入"路径。生产入口（main.go）应改用 NewWithTrust。
 func New(path string) (*Manager, error) {
+	return newManager(path, nil)
+}
+
+// NewWithTrust 构造一个启用"首次信任"GUI 询问的 Manager。
+//
+// emitter 非 nil 时，HostKeyCallback 遇到未知 host 会先调
+// emitter.EmitTrustRequest 推给前端，再同步等待 TrustRequestTimeout
+// （默认 60s）内的 TrustReply。用户 trust → Add 写入 + 放行；
+// 用户 reject / 超时 / 错误 ID → 拒绝。
+//
+// emitter 为 nil 时退化为 New() 行为（自动信任）。传 nil 在生产环境
+// 等同于 v0.1.3，仅用于不想接 GUI 的子命令 / 测试。
+func NewWithTrust(path string, emitter EventEmitter) (*Manager, error) {
+	return newManager(path, emitter)
+}
+
+// newManager 是 New / NewWithTrust 的共享实现。
+func newManager(path string, emitter EventEmitter) (*Manager, error) {
 	if path == "" {
 		return nil, errors.New("knownhosts.New: empty path")
 	}
@@ -102,7 +197,9 @@ func New(path string) (*Manager, error) {
 		return nil, fmt.Errorf("knownhosts.New: mkdir parent: %w", err)
 	}
 	m := &Manager{
-		path: path,
+		path:          path,
+		emitter:       emitter,
+		trustReplyCh:  make(chan TrustReply, replyChannelCapacity),
 	}
 	// 文件不存在 → 创建空文件（首次运行）
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
@@ -138,11 +235,20 @@ func (m *Manager) Size() int {
 // 策略：
 //  1. host pattern + key 都匹配已知 entry → 放行（返回 nil）
 //  2. host pattern 匹配但 key 不匹配 → 拒绝（返回 ErrHostKeyMismatch；MITM 信号）
-//  3. host 全无匹配 → 自动 Add 写入文件 + 放行（返回 nil）
-//
-// v0.1.3 简化：自动信任未知 host。v0.2 接入"首次信任"UI 对话框。
+//  3. host 全无匹配 → 走"首次信任"路径：
+//     a) emitter 非 nil → EmitTrustRequest 给前端；等用户响应
+//        - "trust" → Add 写入 + 放行
+//        - "reject" / 错误 ID / 超时 → 拒绝
+//     b) emitter 为 nil → 自动 Add 写入文件 + 放行（v0.1.3 兜底）
 //
 // 签名遵循 x/crypto v0.22+：返回 error 而非 bool（nil = 放行）。
+//
+// 并发：多个 SSH 连接可能同时触发 HostKeyCallback。trustReplyCh 容量 1
+// 的设计意味着：第一个等待者拿到 reply 后，reply 被消费；第二个等待者
+// 拿到的是别人的 reply（ID 不匹配）或 timeout。
+// v0.5.0 的实际场景（用户在 modal 里点 trust 之前不会同时点第二次连接）
+// 下这个限制可接受；并发 trust 场景需要 map[requestID]chan TrustReply，
+// 留给 v0.6+ 优化。
 func (m *Manager) HostKeyCallback() ssh.HostKeyCallback {
 	return func(host string, remote net.Addr, key ssh.PublicKey) error {
 		a := parseAddr(host)
@@ -155,6 +261,9 @@ func (m *Manager) HostKeyCallback() ssh.HostKeyCallback {
 			// 比"放行"更安全：避免对一个未知 host 静默接受任意 key
 			return fmt.Errorf("knownhosts: cannot determine host from address %q", host)
 		}
+
+		keyType := key.Type()
+		keyBase64 := base64.StdEncoding.EncodeToString(key.Marshal())
 
 		m.mu.RLock()
 		matchIdx := -1
@@ -177,10 +286,47 @@ func (m *Manager) HostKeyCallback() ssh.HostKeyCallback {
 		if anyMatch {
 			return ErrHostKeyMismatch
 		}
-		// 未找到 → 自动 Add（"trust on first use"）
-		// Add 失败不阻塞 SSH 流程（v0.2 应该把错误推到 Wails 事件总线）
-		_ = m.Add(host, key, "mossterm-auto")
-		return nil
+
+		// 未找到 → 走"首次信任"路径。
+		//
+		// 兜底：没有 emitter（单元测试 / CLI 子命令）→ 自动信任（v0.1.3 行为）。
+		if m.emitter == nil {
+			_ = m.Add(host, key, "mossterm-auto")
+			return nil
+		}
+
+		req := TrustRequest{
+			ID:          generateTrustID(),
+			Host:        host,
+			KeyType:     keyType,
+			Fingerprint: shortFingerprint(keyBase64),
+			FullKey:     keyBase64,
+		}
+
+		// 推给前端（非阻塞；实现应立即返回，自身 spawn 协程或仅 emit 事件）
+		m.emitter.EmitTrustRequest(context.Background(), req)
+
+		// 同步等待用户回复（带超时）。
+		//
+		// channel send/receive 自带 happens-before 保证，无需额外锁。
+		select {
+		case reply := <-m.trustReplyCh:
+			if reply.ID != req.ID {
+				// ID 不匹配：多半是并发场景下拿到了"别人的 reply"或"过期的 reply"。
+				// 当前 reply 已被消费，挂起方将 timeout。
+				return fmt.Errorf("knownhosts: trust reply ID mismatch (want %q, got %q)", req.ID, reply.ID)
+			}
+			if reply.Action == "trust" {
+				if err := m.Add(host, key, "mossterm-user"); err != nil {
+					return fmt.Errorf("knownhosts: persist trusted key: %w", err)
+				}
+				return nil
+			}
+			// "reject" 或其他非 trust → 拒绝。
+			return fmt.Errorf("knownhosts: user rejected host key for %q", host)
+		case <-time.After(TrustRequestTimeout):
+			return fmt.Errorf("knownhosts: user trust timeout for %q (waited %s)", host, TrustRequestTimeout)
+		}
 	}
 }
 
@@ -258,6 +404,64 @@ func (m *Manager) Add(host string, key ssh.PublicKey, comment string) error {
 // Close 释放资源。Manager 内部不持有持久句柄，Close 是 no-op。
 func (m *Manager) Close() error {
 	return nil
+}
+
+// ReplyTrust 把前端用户的决策写回 Manager，唤醒挂起的 HostKeyCallback。
+//
+// 由 wailsbindings.App.TrustHost 调用：前端 modal 收到用户点击后，
+// 立刻通过 wails 反射调 TrustHost(id, action) → ReplyTrust(id, action)。
+//
+// 行为：
+//   - 5s 内能写入 trustReplyCh（容量 1）→ 成功；HostKeyCallback 拿到 reply。
+//   - 5s 内写不进去（无挂起请求 / 上一个 reply 还没被消费）→ 返回 error。
+//
+// 注意：返回 error 不代表"用户的决策丢了"——前端可以根据错误重发，
+// 也可以直接关闭 modal 让 SSH 连接走 timeout 失败路径。
+//
+// 锁：channel send/receive 自带 happens-before 保证，ReplyTrust 自身
+// 不需要额外锁。
+func (m *Manager) ReplyTrust(requestID, action string) error {
+	if m.trustReplyCh == nil {
+		return errors.New("knownhosts.ReplyTrust: manager not initialized with NewWithTrust")
+	}
+
+	// 5s 兜底：正常情况下 replyCh 容量 1 总是能立即写入。
+	// 这层 select 只在异常（重复 reply / 无挂起请求）触发。
+	select {
+	case m.trustReplyCh <- TrustReply{ID: requestID, Action: action}:
+		return nil
+	case <-time.After(5 * time.Second):
+		return errors.New("knownhosts.ReplyTrust: no pending request (or reply channel full)")
+	}
+}
+
+// generateTrustID 生成一个 16 字节的随机 ID（base64 URL 编码，无 padding）。
+//
+// 用 crypto/rand 避免可预测的 ID；不需要 RFC 4122 完整 UUID 格式，
+// base64.RawURLEncoding 短 22 字符够用且对前端友好（无 `+` `/`）。
+func generateTrustID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand 失败是极罕见的系统级错误；用全 0 兜底（碰撞概率可忽略）
+		// 注意：仍返回有效 ID，前端能正常匹配；碰撞只意味着可能被错路由
+		// 到同 ID 的其他请求，v0.5.0 概率 ~0，认了。
+		for i := range b {
+			b[i] = 0
+		}
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// shortFingerprint 把完整 base64 key 截短成 16 字符 + "..." 的摘要。
+//
+// 用于 modal 摘要展示（避免一长串 base64 撑爆 UI）。不是真正的指纹
+// 哈希，仅作视觉截断；用户点"展开"时看 FullKey。
+func shortFingerprint(b64 string) string {
+	const max = 16
+	if len(b64) > max {
+		return b64[:max] + "..."
+	}
+	return b64
 }
 
 // loadFromFile 解析 known_hosts 文件到内存 entries。

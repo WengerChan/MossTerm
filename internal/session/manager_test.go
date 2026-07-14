@@ -55,14 +55,38 @@ func (a stubAddr) Network() string { return "stub" }
 func (a stubAddr) String() string  { return string(a) }
 
 // stubSession 是最小可用的 connect.Session 实现。
+//
+// Read 默认**阻塞**，直到 Close 被调用（或 t.Cleanup 触发 close）。
+// 原因：v0.2.0a 起 readLoop 在 reader 退出时会自动调 sessionImpl.Close，
+// 把 state 推到 Closed —— 立即返回 io.EOF 会让 readLoop 在 100ms 内
+// 把测试观察窗口里的 Established 状态改成 Closed，破坏
+// TestOpen_AsyncReturnsBeforeDial 这类"观察 Established 状态"测试。
+// 真实 SSH session 的 Read 会一直阻塞等远端数据，正好符合这里的需求。
 type stubSession struct {
-	conn   net.Conn
-	closed atomic.Bool
+	conn     net.Conn
+	closed   atomic.Bool
+	readDone chan struct{} // 闭包后 Read 返回 EOF
 }
 
-func (s *stubSession) Read(b []byte) (int, error)  { return 0, io.EOF }
+func newStubSession(conn net.Conn) *stubSession {
+	return &stubSession{conn: conn, readDone: make(chan struct{})}
+}
+
+func (s *stubSession) Read(b []byte) (int, error) {
+	<-s.readDone
+	return 0, io.EOF
+}
 func (s *stubSession) Write(b []byte) (int, error) { return len(b), nil }
-func (s *stubSession) Close() error                { s.closed.Store(true); return nil }
+func (s *stubSession) Close() error {
+	s.closed.Store(true)
+	select {
+	case <-s.readDone:
+		// 已 closed
+	default:
+		close(s.readDone)
+	}
+	return nil
+}
 func (s *stubSession) Resize(cols, rows int) error { return nil }
 func (s *stubSession) ShellPID() int               { return 0 }
 
@@ -111,7 +135,7 @@ func (c *testConnector) OpenSession(ctx context.Context, conn net.Conn, opts con
 	if c.openErr != nil {
 		return nil, c.openErr
 	}
-	return &stubSession{conn: conn}, nil
+	return newStubSession(conn), nil
 }
 
 // -----------------------------------------------------------------------------

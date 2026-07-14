@@ -12,6 +12,7 @@ package wailsbindings
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/mossterm/mossterm/internal/app"
@@ -162,4 +163,36 @@ func (a *App) GetSecretContent(ctx context.Context, id string) (string, error) {
 		return "", fmt.Errorf("wailsbindings.GetSecretContent: %w", err)
 	}
 	return string(data), nil
+}
+
+// -----------------------------------------------------------------------------
+// Known Hosts（v0.5.0 First-Use Trust）
+// -----------------------------------------------------------------------------
+
+// TrustHost 把前端的"信任决策"回传给 known_hosts.Manager。
+//
+// 调用栈（v0.5.0）：
+//  1. 用户在 modal 点 trust/reject
+//  2. 前端 TrustRequestModal 调 App.TrustHost(requestID, action)
+//  3. 本方法调 known_hosts.Manager.ReplyTrust(requestID, action)
+//  4. Manager 把 reply 写入内部 trustReplyCh，唤醒挂起的 HostKeyCallback
+//  5. SSH 握手继续 / 中断
+//
+// 参数约定：
+//   - requestID：必须与 TrustRequestModal 收到的事件 ID 完全一致
+//     （Manager 校验 ID 不匹配会返回 ID mismatch 错误并把当前 reply 丢弃）。
+//   - action："trust" | "reject" | 其他（视作 reject）。
+//
+// 错误：known_hosts 未初始化时返回 "known_hosts not initialized"。
+// 该方法本身不返回 reply 同步结果——前端调完即关闭 modal，
+// reply 是否被采纳由 Manager 内部异步处理。
+func (a *App) TrustHost(ctx context.Context, requestID string, action string) error {
+	kh := a.core.KnownHosts()
+	if kh == nil {
+		return errors.New("wailsbindings.TrustHost: known_hosts not initialized")
+	}
+	if err := kh.ReplyTrust(requestID, action); err != nil {
+		return fmt.Errorf("wailsbindings.TrustHost: %w", err)
+	}
+	return nil
 }

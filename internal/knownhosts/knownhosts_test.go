@@ -1,6 +1,7 @@
 package knownhosts
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -9,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -718,5 +721,508 @@ func TestHostKeyCallback_RejectsUnparseableHost(t *testing.T) {
 	}
 	if m.Size() != 0 {
 		t.Errorf("Size = %d, want 0 (rejected callback should not auto-add)", m.Size())
+	}
+}
+
+// =============================================================================
+// v0.5.0 First-Use Trust 测试
+// =============================================================================
+
+// mockEmitter 实现 knownhosts.EventEmitter 接口，捕获所有 EmitTrustRequest 调用。
+//
+// 行为：把 ctx + req 写入 FIFO 队列 + signal channel（buffered），
+// 测试 goroutine 通过 signal channel 同步等待 emitter 被调用，然后
+// 调 Manager.ReplyTrust 模拟前端用户响应。
+//
+// FIFO 语义：每次 waitForCall 弹出**最早一条**未消费 call，匹配
+// "第 N 次 Emit 触发第 N 次 waitForCall"的自然测试节奏。
+// 之前版本固定返回 calls[0]，导致多次 emit 后 waitForCall 拿到的
+// 是过期的 call，破坏了 "emit a → reply a; emit b → reply b" 的语义。
+type mockEmitter struct {
+	mu     sync.Mutex
+	calls  []capturedEmit // FIFO queue
+	signal chan struct{}  // buffered; size = 同时等待的 emit 数
+}
+
+type capturedEmit struct {
+	Ctx context.Context
+	Req TrustRequest
+}
+
+func newMockEmitter(bufSize int) *mockEmitter {
+	return &mockEmitter{
+		signal: make(chan struct{}, bufSize),
+	}
+}
+
+// EmitTrustRequest 捕获请求并 signal。
+func (e *mockEmitter) EmitTrustRequest(ctx context.Context, req TrustRequest) {
+	e.mu.Lock()
+	e.calls = append(e.calls, capturedEmit{Ctx: ctx, Req: req})
+	e.mu.Unlock()
+	// 非阻塞 signal —— buffer 必须够大
+	select {
+	case e.signal <- struct{}{}:
+	default:
+	}
+}
+
+// waitForCall 阻塞直到至少一次 Emit 被调用（用于同步 HostKeyCallback 等待点）。
+//
+// FIFO 弹出：每次 waitForCall 消费**最早一条**未读 call，确保多次 Emit
+// 场景下每次都能拿到与本次 Emit 配对的 TrustRequest（从而拿对 ID）。
+func (e *mockEmitter) waitForCall(t *testing.T, d time.Duration) capturedEmit {
+	t.Helper()
+	select {
+	case <-e.signal:
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if len(e.calls) == 0 {
+			t.Fatal("mockEmitter signaled but no calls recorded")
+		}
+		// FIFO: 弹出最早一条
+		call := e.calls[0]
+		e.calls = e.calls[1:]
+		return call
+	case <-time.After(d):
+		t.Fatalf("mockEmitter: no Emit within %s", d)
+		return capturedEmit{}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// NewWithTrust 基础测试
+// -----------------------------------------------------------------------------
+
+func TestNewWithTrust_NilEmitter_FallsBackToAutoTrust(t *testing.T) {
+	// nil emitter 行为：和 New() 一样，自动 Add 写入 + 放行
+	// （v0.1.3 兜底路径，单元测试 / CLI 子命令场景）
+	path := filepath.Join(t.TempDir(), "kh")
+	m, err := NewWithTrust(path, nil)
+	if err != nil {
+		t.Fatalf("NewWithTrust: %v", err)
+	}
+	signer := generateTestKey(t)
+	cb := m.HostKeyCallback()
+
+	if err := cb("newhost.com", &net.TCPAddr{Port: 22}, signer.PublicKey()); err != nil {
+		t.Fatalf("callback (nil emitter): err = %v, want nil (auto-trust)", err)
+	}
+	if m.Size() != 1 {
+		t.Errorf("Size = %d, want 1 (auto-trusted)", m.Size())
+	}
+}
+
+func TestNewWithTrust_RequiresNonEmptyPath(t *testing.T) {
+	// NewWithTrust 仍要求非空 path
+	if _, err := NewWithTrust("", nil); err == nil {
+		t.Error("NewWithTrust(\"\", nil) should return error (empty path)")
+	}
+}
+
+func TestNew_DoesNotEnableTrust(t *testing.T) {
+	// New() 返回的 Manager 即使 m.emitter 看起来是 nil，也不应尝试
+	// EmitTrustRequest。直接验证 HostKeyCallback 在 New() 路径上
+	// 走自动 Add 兜底（不报错 + 写入 1 个 entry）。
+	path := filepath.Join(t.TempDir(), "kh")
+	m, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if m.emitter != nil {
+		t.Errorf("New() should leave emitter nil, got %v", m.emitter)
+	}
+	signer := generateTestKey(t)
+	cb := m.HostKeyCallback()
+
+	if err := cb("legacy.example.com", &net.TCPAddr{}, signer.PublicKey()); err != nil {
+		t.Fatalf("cb: %v", err)
+	}
+	if m.Size() != 1 {
+		t.Errorf("Size = %d, want 1", m.Size())
+	}
+}
+
+// -----------------------------------------------------------------------------
+// 完整 trust 流程
+// -----------------------------------------------------------------------------
+
+func TestHostKeyCallback_TrustRequest_TrustFlow(t *testing.T) {
+	dir := t.TempDir()
+	emitter := newMockEmitter(1)
+	m, err := NewWithTrust(filepath.Join(dir, "kh"), emitter)
+	if err != nil {
+		t.Fatalf("NewWithTrust: %v", err)
+	}
+	signer := generateTestKey(t)
+	cb := m.HostKeyCallback()
+
+	// 模拟前端 modal 行为：收到 EmitTrustRequest 后调 ReplyTrust(trust)
+	responderDone := make(chan struct{})
+	go func() {
+		defer close(responderDone)
+		call := emitter.waitForCall(t, 2*time.Second)
+		if call.Req.Host != "newhost.com" {
+			t.Errorf("TrustRequest.Host = %q, want %q", call.Req.Host, "newhost.com")
+		}
+		if call.Req.KeyType != "ssh-ed25519" {
+			t.Errorf("TrustRequest.KeyType = %q, want %q", call.Req.KeyType, "ssh-ed25519")
+		}
+		if call.Req.ID == "" {
+			t.Error("TrustRequest.ID is empty")
+		}
+		if call.Req.Fingerprint == "" {
+			t.Error("TrustRequest.Fingerprint is empty")
+		}
+		if call.Req.FullKey == "" {
+			t.Error("TrustRequest.FullKey is empty")
+		}
+		if err := m.ReplyTrust(call.Req.ID, "trust"); err != nil {
+			t.Errorf("ReplyTrust: %v", err)
+		}
+	}()
+
+	if err := cb("newhost.com", &net.TCPAddr{Port: 22}, signer.PublicKey()); err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	<-responderDone
+
+	// 1) entry 已写入
+	if m.Size() != 1 {
+		t.Errorf("Size = %d, want 1 (user trusted)", m.Size())
+	}
+	// 2) 文件持久化了
+	data, err := os.ReadFile(filepath.Join(dir, "kh"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "mossterm-user") {
+		t.Errorf("file content missing 'mossterm-user' comment: %q", string(data))
+	}
+	if !strings.Contains(string(data), "newhost.com") {
+		t.Errorf("file content missing 'newhost.com': %q", string(data))
+	}
+	// 3) 第二次连接应当走"已知 + 匹配"路径，不再触发 trust
+	emitter2 := newMockEmitter(1)
+	m2, err := NewWithTrust(filepath.Join(dir, "kh"), emitter2)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	cb2 := m2.HostKeyCallback()
+	if err := cb2("newhost.com", &net.TCPAddr{Port: 22}, signer.PublicKey()); err != nil {
+		t.Errorf("second connect (known+matched): err = %v, want nil", err)
+	}
+	// 第二次不应该触发 emit
+	if len(emitter2.calls) != 0 {
+		t.Errorf("second connect should not emit, got %d emits", len(emitter2.calls))
+	}
+}
+
+func TestHostKeyCallback_TrustRequest_RejectFlow(t *testing.T) {
+	dir := t.TempDir()
+	emitter := newMockEmitter(1)
+	m, err := NewWithTrust(filepath.Join(dir, "kh"), emitter)
+	if err != nil {
+		t.Fatalf("NewWithTrust: %v", err)
+	}
+	signer := generateTestKey(t)
+	cb := m.HostKeyCallback()
+
+	responderDone := make(chan struct{})
+	go func() {
+		defer close(responderDone)
+		call := emitter.waitForCall(t, 2*time.Second)
+		if err := m.ReplyTrust(call.Req.ID, "reject"); err != nil {
+			t.Errorf("ReplyTrust: %v", err)
+		}
+	}()
+
+	err = cb("newhost.com", &net.TCPAddr{Port: 22}, signer.PublicKey())
+	<-responderDone
+
+	if err == nil {
+		t.Fatal("callback should return error when user rejects")
+	}
+	if !strings.Contains(err.Error(), "rejected") {
+		t.Errorf("err = %v, want 'rejected' in message", err)
+	}
+	if m.Size() != 0 {
+		t.Errorf("Size = %d, want 0 (rejected should not add entry)", m.Size())
+	}
+	// 文件不应有该 host 的记录
+	data, _ := os.ReadFile(filepath.Join(dir, "kh"))
+	if strings.Contains(string(data), "newhost.com") {
+		t.Errorf("file should not contain rejected host: %q", string(data))
+	}
+}
+
+func TestHostKeyCallback_TrustRequest_UnknownActionTreatedAsReject(t *testing.T) {
+	// "trust" 以外的任何 action 都按 reject 处理（保守：宁拒勿纵）
+	dir := t.TempDir()
+	emitter := newMockEmitter(1)
+	m, err := NewWithTrust(filepath.Join(dir, "kh"), emitter)
+	if err != nil {
+		t.Fatalf("NewWithTrust: %v", err)
+	}
+	signer := generateTestKey(t)
+	cb := m.HostKeyCallback()
+
+	responderDone := make(chan struct{})
+	go func() {
+		defer close(responderDone)
+		call := emitter.waitForCall(t, 2*time.Second)
+		_ = m.ReplyTrust(call.Req.ID, "maybe") // 非 trust / 非 reject
+	}()
+
+	err = cb("newhost.com", &net.TCPAddr{}, signer.PublicKey())
+	<-responderDone
+
+	if err == nil {
+		t.Fatal("callback should return error for non-trust action")
+	}
+	if m.Size() != 0 {
+		t.Errorf("Size = %d, want 0", m.Size())
+	}
+}
+
+func TestHostKeyCallback_TrustRequest_Timeout(t *testing.T) {
+	// 用户不响应 → HostKeyCallback 在 TrustRequestTimeout 后返回 error
+	//
+	// 用一个非常短的临时超时（避免真的等 60s）；结束后恢复。
+	dir := t.TempDir()
+	emitter := newMockEmitter(1)
+	m, err := NewWithTrust(filepath.Join(dir, "kh"), emitter)
+	if err != nil {
+		t.Fatalf("NewWithTrust: %v", err)
+	}
+	signer := generateTestKey(t)
+	cb := m.HostKeyCallback()
+
+	// 临时缩短 timeout；测试结束恢复
+	origTimeout := TrustRequestTimeout
+	TrustRequestTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { TrustRequestTimeout = origTimeout })
+
+	// 启动 goroutine 监 emit（不做 reply，让 HostKeyCallback 自然 timeout）
+	emitConfirmed := make(chan struct{})
+	go func() {
+		defer close(emitConfirmed)
+		_ = emitter.waitForCall(t, 2*time.Second) // 确认请求已发出
+	}()
+
+	start := time.Now()
+	err = cb("newhost.com", &net.TCPAddr{}, signer.PublicKey())
+	elapsed := time.Since(start)
+	<-emitConfirmed
+
+	if err == nil {
+		t.Fatal("callback should return timeout error")
+	}
+	if !strings.Contains(err.Error(), "timeout") {
+		t.Errorf("err = %v, want 'timeout' in message", err)
+	}
+	if elapsed < 200*time.Millisecond {
+		t.Errorf("elapsed = %s, want >= 200ms (timeout should be honored)", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("elapsed = %s, want < 2s (timeout was overridden)", elapsed)
+	}
+	if m.Size() != 0 {
+		t.Errorf("Size = %d, want 0 (timed-out should not add entry)", m.Size())
+	}
+}
+
+func TestHostKeyCallback_TrustRequest_IDMismatch(t *testing.T) {
+	// ReplyTrust 用了错误的 ID → HostKeyCallback 返回 ID mismatch error
+	dir := t.TempDir()
+	emitter := newMockEmitter(1)
+	m, err := NewWithTrust(filepath.Join(dir, "kh"), emitter)
+	if err != nil {
+		t.Fatalf("NewWithTrust: %v", err)
+	}
+	signer := generateTestKey(t)
+	cb := m.HostKeyCallback()
+
+	responderDone := make(chan struct{})
+	go func() {
+		defer close(responderDone)
+		call := emitter.waitForCall(t, 2*time.Second)
+		// 故意发错 ID
+		if err := m.ReplyTrust("WRONG-ID-"+call.Req.ID, "trust"); err != nil {
+			t.Errorf("ReplyTrust: %v", err)
+		}
+	}()
+
+	err = cb("newhost.com", &net.TCPAddr{}, signer.PublicKey())
+	<-responderDone
+
+	if err == nil {
+		t.Fatal("callback should return ID mismatch error")
+	}
+	if !strings.Contains(err.Error(), "ID mismatch") {
+		t.Errorf("err = %v, want 'ID mismatch' in message", err)
+	}
+	if m.Size() != 0 {
+		t.Errorf("Size = %d, want 0 (ID mismatch should not add entry)", m.Size())
+	}
+}
+
+// -----------------------------------------------------------------------------
+// ReplyTrust 边界
+// -----------------------------------------------------------------------------
+
+func TestReplyTrust_NoPendingRequest_ReturnsError(t *testing.T) {
+	// 没有挂起的 HostKeyCallback 时调 ReplyTrust → 应在 5s 内返回 error
+	dir := t.TempDir()
+	emitter := newMockEmitter(1)
+	m, err := NewWithTrust(filepath.Join(dir, "kh"), emitter)
+	if err != nil {
+		t.Fatalf("NewWithTrust: %v", err)
+	}
+
+	// ReplyTrust 在无 pending 时：replyCh 容量 1 → send 立即成功
+	// （即使没人在 receive，buffered channel 也能 send）
+	// 实际语义：写入成功，Manager 内部 trustReplyCh 持有这条 reply；
+	// 后续 HostKeyCallback 收到时 ID 必然不匹配 → 走 ID mismatch 错误路径。
+	//
+	// 这个测试的真正目的是确保 ReplyTrust 不 panic、不阻塞。
+	done := make(chan error, 1)
+	go func() {
+		done <- m.ReplyTrust("any-id", "trust")
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("ReplyTrust (no pending) should succeed (buffered), got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReplyTrust (no pending) blocked > 2s — should be immediate")
+	}
+}
+
+func TestReplyTrust_AfterRejection_StateRecovers(t *testing.T) {
+	// 验证：第一次连接 reject 后，trustReplyCh 已被消费；
+	// 第二次连接的 HostKeyCallback 走正常路径（不残留 stale reply）。
+	dir := t.TempDir()
+	emitter := newMockEmitter(2)
+	m, err := NewWithTrust(filepath.Join(dir, "kh"), emitter)
+	if err != nil {
+		t.Fatalf("NewWithTrust: %v", err)
+	}
+	signer := generateTestKey(t)
+	cb := m.HostKeyCallback()
+
+	// 第一次：拒绝
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		call := emitter.waitForCall(t, 2*time.Second)
+		_ = m.ReplyTrust(call.Req.ID, "reject")
+	}()
+	_ = cb("a.example.com", &net.TCPAddr{}, signer.PublicKey())
+	<-firstDone
+
+	// 第二次：信任（应正常走通，channel 不应残留旧 reply）
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		call := emitter.waitForCall(t, 2*time.Second)
+		_ = m.ReplyTrust(call.Req.ID, "trust")
+	}()
+	if err := cb("b.example.com", &net.TCPAddr{}, signer.PublicKey()); err != nil {
+		t.Errorf("second connect after reject: err = %v, want nil", err)
+	}
+	<-secondDone
+
+	// 第二次信任后应写入 entry
+	if m.Size() != 1 {
+		t.Errorf("Size = %d, want 1 (only b should be added; a was rejected)", m.Size())
+	}
+}
+
+// -----------------------------------------------------------------------------
+// 辅助函数测试
+// -----------------------------------------------------------------------------
+
+func TestGenerateTrustID_UniqueAndNonEmpty(t *testing.T) {
+	a := generateTrustID()
+	b := generateTrustID()
+	if a == "" || b == "" {
+		t.Fatalf("generateTrustID returned empty: a=%q, b=%q", a, b)
+	}
+	if a == b {
+		t.Errorf("generateTrustID returned duplicate: %q", a)
+	}
+	// base64.RawURLEncoding 22 字符
+	if len(a) != 22 {
+		t.Errorf("ID length = %d, want 22 (base64.RawURLEncoding(16 bytes))", len(a))
+	}
+}
+
+func TestShortFingerprint(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"short", "short"},
+		{"", ""},
+		{"0123456789abcdef", "0123456789abcdef"}, // 16 字符不加 "..."
+		{"0123456789abcdefg", "0123456789abcdef..."}, // 17 字符 → 截 16 + "..."
+		{"0123456789abcdefghijklmnop", "0123456789abcdef..."},
+	}
+	for _, c := range cases {
+		got := shortFingerprint(c.in)
+		if got != c.want {
+			t.Errorf("shortFingerprint(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// 已知 host 不走 trust 路径
+// -----------------------------------------------------------------------------
+
+func TestHostKeyCallback_KnownHost_DoesNotEmit(t *testing.T) {
+	// 已知 + 匹配 → 不应 emit TrustRequest
+	signer := generateTestKey(t)
+	content := khLine(t, "known.com", signer) + "\n"
+	path := writeKH(t, content)
+
+	emitter := newMockEmitter(1)
+	m, err := NewWithTrust(path, emitter)
+	if err != nil {
+		t.Fatalf("NewWithTrust: %v", err)
+	}
+	cb := m.HostKeyCallback()
+
+	if err := cb("known.com", &net.TCPAddr{}, signer.PublicKey()); err != nil {
+		t.Fatalf("cb: %v", err)
+	}
+	if len(emitter.calls) != 0 {
+		t.Errorf("known+matched should not emit, got %d emits", len(emitter.calls))
+	}
+}
+
+func TestHostKeyCallback_MITM_DoesNotEmit(t *testing.T) {
+	// 已知 + 不匹配（MITM）→ 拒绝，不应 emit
+	signer := generateTestKey(t)
+	otherSigner := generateTestKey(t)
+	content := khLine(t, "known.com", signer) + "\n"
+	path := writeKH(t, content)
+
+	emitter := newMockEmitter(1)
+	m, err := NewWithTrust(path, emitter)
+	if err != nil {
+		t.Fatalf("NewWithTrust: %v", err)
+	}
+	cb := m.HostKeyCallback()
+
+	err = cb("known.com", &net.TCPAddr{}, otherSigner.PublicKey())
+	if err != ErrHostKeyMismatch {
+		t.Errorf("MITM: err = %v, want ErrHostKeyMismatch", err)
+	}
+	if len(emitter.calls) != 0 {
+		t.Errorf("MITM should not emit, got %d emits", len(emitter.calls))
 	}
 }

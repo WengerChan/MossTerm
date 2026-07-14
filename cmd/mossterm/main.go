@@ -123,16 +123,20 @@ func run(flags *cliFlags, logger *slog.Logger) error {
 	}
 	logger.Info("secret store ready")
 
-	// 2.5 known_hosts：host key 持久化（v0.1.3+）
+	// 2.5 known_hosts：host key 持久化（v0.1.3+，v0.5.0 接入首次信任 GUI 弹窗）
 	//
 	// 放在 config.toml 同目录下（默认 ~/.config/mossterm/known_hosts），
 	// 与 OpenSSH 不共用，便于隔离与排查。
+	//
+	// v0.5.0：用 NewWithTrust 替代 New；emitter 把"是否信任"问题
+	// 推到前端（wailsEmitter 实现了 knownhosts.EventEmitter 接口）。
+	// 未知 host → 弹 modal → 前端调 App.TrustHost → ReplyTrust → 决定。
 	knownHostsPath := filepath.Join(filepath.Dir(cfg.Path()), "known_hosts")
-	kh, err := knownhosts.New(knownHostsPath)
+	kh, err := knownhosts.NewWithTrust(knownHostsPath, wailsEmitter{})
 	if err != nil {
 		return fmt.Errorf("init known_hosts at %s: %w", knownHostsPath, err)
 	}
-	logger.Info("known_hosts ready", "path", knownHostsPath, "entries", kh.Size())
+	logger.Info("known_hosts ready", "path", knownHostsPath, "entries", kh.Size(), "trust", "gui")
 
 	// 3. 跳板策略 registry
 	//
@@ -167,6 +171,7 @@ func run(flags *cliFlags, logger *slog.Logger) error {
 		Secret:     sec,
 		Sessions:   mm,
 		Agents:     ag,
+		KnownHosts: kh, // v0.5.0：供 wailsbindings.TrustHost 调 ReplyTrust
 		Connectors: reg,
 		Emitter:    wailsEmitter{},
 		Log:        logger,
@@ -236,13 +241,37 @@ func isAlreadyRegistered(err error) bool {
 // Wails 事件总线适配
 // -----------------------------------------------------------------------------
 
-// wailsEmitter 实现 app.EventEmitter，包装 wails runtime.EventsEmit。
+// wailsEmitter 同时实现 app.EventEmitter 和 knownhosts.EventEmitter。
 //
-// 行为：把 ctx + event + data 透传给 wails runtime。
-// 实际推送效果：前端通过 EventsOn(event, handler) 收到回调。
+// 设计要点：
+//   - 一个 struct 满足两个接口，避免在 main.go 里维护两份 emitter 适配器。
+//   - Emit：app 层通用事件总线（"app:ready" 等），透传到 wailsruntime.EventsEmit。
+//   - EmitTrustRequest：known_hosts 首次信任专用，emit 后**不**等待
+//     任何 reply —— reply 通过 wailsbindings.TrustHost → Manager.ReplyTrust
+//     走另一条路径。
+//
+// 线程安全：wailsruntime.EventsEmit 内部已线程安全；本 struct 零字段，
+// 全部方法 value receiver，可以从任意 goroutine 调用。
 type wailsEmitter struct{}
 
-// Emit 把事件推送到 Wails 事件总线。
+// Emit 把事件推送到 Wails 事件总线（满足 app.EventEmitter）。
 func (wailsEmitter) Emit(ctx context.Context, event string, data ...interface{}) {
 	wailsruntime.EventsEmit(ctx, event, data...)
+}
+
+// EmitTrustRequest 把"是否信任"请求推给前端（满足 knownhosts.EventEmitter）。
+//
+// 推送的 Wails 事件名："knownhosts:trust-request"
+// payload：knownhosts.TrustRequest 的 JSON（前端 TypeScript 类型镜像）。
+//
+// 注意：这里**不**等待 reply。该方法必须非阻塞 —— 实际等待用户响应
+// 由 knownhosts.Manager.HostKeyCallback 自己用 trustReplyCh 同步等待。
+// 因此 EmitTrustRequest 自身实现就只是 wailsruntime.EventsEmit 的一层
+// 包装。
+//
+// v0.5.0 用 context.Background()：wails runtime 不依赖 ctx 取消；
+// 后续若要加超时（比如前端 30s 不响应就 emit 兜底事件），再换成
+// 带 ctx 的实现。
+func (wailsEmitter) EmitTrustRequest(ctx context.Context, req knownhosts.TrustRequest) {
+	wailsruntime.EventsEmit(ctx, "knownhosts:trust-request", req)
 }

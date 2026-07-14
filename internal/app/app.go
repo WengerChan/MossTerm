@@ -16,6 +16,7 @@ import (
 	"github.com/mossterm/mossterm/internal/ai"
 	"github.com/mossterm/mossterm/internal/config"
 	"github.com/mossterm/mossterm/internal/connect"
+	"github.com/mossterm/mossterm/internal/knownhosts"
 	"github.com/mossterm/mossterm/internal/plugin"
 	"github.com/mossterm/mossterm/internal/secret"
 	"github.com/mossterm/mossterm/internal/session"
@@ -42,14 +43,15 @@ type EventEmitter interface {
 type App struct {
 	ctx context.Context
 
-	cfg       *config.Manager
-	secret    secret.Store
-	sessions  session.Manager
-	transfers transfer.Engine
-	tunnels   tunnel.Manager
-	agents    agent.Registry
-	plugins   plugin.Host
-	ai        ai.Client
+	cfg        *config.Manager
+	secret     secret.Store
+	sessions   session.Manager
+	transfers  transfer.Engine
+	tunnels    tunnel.Manager
+	agents     agent.Registry
+	plugins    plugin.Host
+	ai         ai.Client
+	knownHosts *knownhosts.Manager
 
 	// connectors 是 connect.Connector 的注册表，被 sessions.Manager 共享。
 	// v0.1 默认注册 "ssh" scheme → sshclient.Factory。
@@ -75,6 +77,14 @@ type Deps struct {
 	Agents    agent.Registry
 	Plugins   plugin.Host
 	AI        ai.Client
+
+	// KnownHosts 是 known_hosts 文件管理器（v0.1.3+），同时被 session.Manager
+	// 注入到 sshclient（用于 HostKeyCallback）和 wailsbindings 引用
+	// （用于 TrustHost → ReplyTrust）。
+	//
+	// 可选；nil 时 sshclient 兜底为 InsecureIgnoreHostKey + 自动信任，
+	// wailsbindings.TrustHost 返回 "known_hosts not initialized"。
+	KnownHosts *knownhosts.Manager
 
 	// Connectors 是外部传入的 connect.Registry；为 nil 时 New 自己创建
 	// 一个空 registry，然后通过 WireDefaultConnectors 注册 sshclient。
@@ -139,6 +149,7 @@ func New(deps Deps) *App {
 		agents:     deps.Agents,
 		plugins:    deps.Plugins,
 		ai:         deps.AI,
+		knownHosts: deps.KnownHosts,
 		connectors: registry,
 		emitter:    deps.Emitter,
 		log:        deps.Log,
@@ -226,6 +237,15 @@ func (a *App) Sessions() session.Manager { return a.sessions }
 
 // Connectors 返回 connect.Registry 引用。
 func (a *App) Connectors() connect.Registry { return a.connectors }
+
+// KnownHosts 返回 known_hosts 管理器引用。
+//
+// 主要供 wailsbindings.TrustHost 调用 ReplyTrust；
+// 业务模块（sshclient）通过 connect.Deps 拿到同一份引用。
+//
+// 返回 nil 时说明 main.go 没注入 known_hosts（极少见，仅单元测试），
+// 调用方应自行兜底为"功能不可用"。
+func (a *App) KnownHosts() *knownhosts.Manager { return a.knownHosts }
 
 // Log 返回结构化 logger。
 func (a *App) Log() *slog.Logger { return a.log }

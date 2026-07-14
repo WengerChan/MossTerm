@@ -28,6 +28,11 @@ export class App {
   static GetSecretContent(id: string): Promise<string>;
   static SaveSecret(name: string, kind: string, content: string): Promise<string>;
   static DeleteSecret(id: string): Promise<void>;
+
+  // v0.5.0 First-Use Trust：前端弹窗收到 "knownhosts:trust-request" 事件后，
+  // 用户点 trust/reject → 调 TrustHost(id, action) 通知后端。
+  // action: "trust" | "reject" | 其他（视作 reject）。
+  static TrustHost(requestID: string, action: string): Promise<void>;
 }
 
 export default App;

@@ -36,6 +36,10 @@ node_modules/
 # wails dev/build 会覆盖里面内容。
 !/frontend/dist/
 !/frontend/dist/index.html
+# cmd/mossterm/frontend/dist/ —— v0.5.0 起 main.go 的 //go:embed 路径
+# （相对 main.go 所在目录）。同样放占位让 `go build` 能过。
+!/cmd/mossterm/frontend/dist/
+!/cmd/mossterm/frontend/dist/index.html
 /frontend/build/
 /frontend/node_modules/
 /frontend/.vite/
