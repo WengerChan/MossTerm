@@ -1,17 +1,19 @@
 name: ci
 
-# MossTerm CI —— 跑三件事：
-#  1. 代码质量：lint（go + ts）+ vet + 格式检查
-#  2. 测试：单元测试（带 race）+ 构建产物 smoke
-#  3. 跨平台构建：darwin / linux / windows
+# MossTerm CI —— 跑四件事：
+#   1. quality：Go lint / vet / gofmt + 前端 lint / typecheck / build
+#   2. test    ：多平台单元测试（race + coverage）
+#   3. build   ：跨平台 wails build（产出可执行 artifact）
 #
-# 注意：Wails 应用最终产物在 `wails build` 阶段生成，
-#       本 workflow 暂以 `go build ./cmd/mossterm` 走通 CI 骨架，
-#       接入 Wails 的 desktop build 见 .github/workflows/release.yml（待补）。
-
+# 发版流程（tag push / 手动）见 .github/workflows/release.yml。
+#
+# 触发：
+#   - push  到 main / develop / release/**
+#   - pull_request 到 main / develop
+#   - 手动 workflow_dispatch
 on:
   push:
-    branches: [main, develop, release/**]
+    branches: [main, develop, "release/**"]
     tags: ["v*"]
   pull_request:
     branches: [main, develop]
@@ -22,22 +24,27 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# 最小权限
+# 最小权限：build 不需要写
 permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.22"
+  # 最低 1.23+ —— wails 2.12 + x/crypto v0.22 推荐；本地是 1.26.x
+  GO_VERSION: "1.23"
   NODE_VERSION: "20"
-  # 本仓库的 module 路径，供 go test 引用
+  WAILS_VERSION: "v2.12.0"
+  # 本仓库 module 路径
   GO_PACKAGE: github.com/mossterm/mossterm
+  # 与 Makefile 保持一致
+  PKG_PATH: github.com/mossterm/mossterm
+  APP_NAME: mossterm
 
 jobs:
   # ============================================================
-  # Job 1: 代码质量（Go lint + 前端 lint，单平台跑就够快）
+  # Job 1: 代码质量（lint / vet / gofmt / 前端 lint / typecheck / build）
   # ============================================================
   quality:
-    name: quality (lint + vet)
+    name: quality (lint + vet + fmt)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -85,24 +92,26 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
 
-      # 前端 lint（如未配 eslint 可注释掉）
+      # —— 前端三件套：lint / typecheck / build，全部 fail-fast ——
       - name: 前端依赖安装
         run: |
-          if [ -f frontend/package.json ]; then
-            cd frontend && npm ci || npm install
-          else
-            echo "frontend/package.json 暂未就绪，跳过"
-          fi
-        continue-on-error: true
+          cd frontend
+          npm ci
 
-      - name: 前端 lint / typecheck
+      - name: 前端 typecheck
         run: |
-          if [ -f frontend/package.json ]; then
-            cd frontend
-            npm run lint || echo "lint 暂未配置"
-            npm run typecheck || echo "typecheck 暂未配置"
-          fi
-        continue-on-error: true
+          cd frontend
+          npm run typecheck
+
+      - name: 前端 lint
+        run: |
+          cd frontend
+          npm run lint
+
+      - name: 前端 build
+        run: |
+          cd frontend
+          npm run build
 
   # ============================================================
   # Job 2: 单元测试（多平台都跑，覆盖 race detector）
@@ -155,31 +164,43 @@ jobs:
           path: coverage.out
 
   # ============================================================
-  # Job 3: 跨平台构建产物（只 go build cmd/mossterm 跑通骨架）
+  # Job 3: 跨平台 wails build（产出可执行 artifact）
+  #   matrix:
+  #     linux/amd64     ubuntu-latest
+  #     darwin/universal macos-latest
+  #     windows/amd64   windows-latest
   # ============================================================
   build:
-    name: build (${{ matrix.os }})
+    name: build (${{ matrix.platform }})
     needs: [quality, test]
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
+            platform: linux/amd64
             ext: ""
             archive: tar.gz
             bin: mossterm
           - os: macos-latest
+            platform: darwin/universal
             ext: ""
             archive: tar.gz
             bin: mossterm
           - os: windows-latest
+            platform: windows/amd64
             ext: ".exe"
             archive: zip
             bin: mossterm.exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      VERSION: ${{ github.ref_name }}
+      COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -187,31 +208,75 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: go mod download
-        run: go mod download
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
-      - name: 构建二进制
+      - name: 安装 Linux 桌面依赖 (gtk3 + webkit)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev pkg-config build-essential
+
+      - name: 安装 Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+          echo "${{ env.GOPATH }}/bin" >> "$GITHUB_PATH"
+          wails version
+
+      - name: wails doctor
+        run: wails doctor || true
+
+      - name: 前端依赖安装
+        run: |
+          cd frontend
+          npm ci
+
+      - name: 计算构建元数据
+        id: meta
+        run: |
+          # tag 是 v* 时用 ref_name，否则用 git describe 兜底
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            DESCRIBE=$(git describe --tags --always 2>/dev/null || echo "dev")
+            echo "version=${DESCRIBE}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: wails build (${{ matrix.platform }})
         run: |
           mkdir -p dist
-          CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" \
-            -o "dist/${{ matrix.bin }}" \
-            ./cmd/mossterm
+          # 拼接 ldflags —— 与 Makefile 保持一致
+          LDFLAGS="-s -w \
+            -X '${{ env.PKG_PATH }}/internal/app.Version=${{ steps.meta.outputs.version }}' \
+            -X '${{ env.PKG_PATH }}/internal/app.Commit=${{ steps.meta.outputs.commit }}' \
+            -X '${{ env.PKG_PATH }}/internal/app.BuildDate=${{ steps.meta.outputs.build_date }}'"
+          wails build \
+            -platform ${{ matrix.platform }} \
+            -trimpath \
+            -ldflags "$LDFLAGS" \
+            -o "dist/${{ matrix.bin }}"
 
       - name: 打包归档
         run: |
           cd dist
           if [ "${{ matrix.archive }}" = "tar.gz" ]; then
-            tar -czf "mossterm-${{ matrix.os }}.tar.gz" "${{ matrix.bin }}"
+            tar -czf "mossterm-${{ matrix.platform }}.tar.gz" "${{ matrix.bin }}"
           else
-            powershell -NoProfile -Command "Compress-Archive -Path '${{ matrix.bin }}' -DestinationPath 'mossterm-${{ matrix.os }}.zip'"
+            powershell -NoProfile -Command "Compress-Archive -Path '${{ matrix.bin }}' -DestinationPath 'mossterm-${{ matrix.platform }}.zip'"
           fi
         shell: bash
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: mossterm-${{ matrix.os }}
+          name: mossterm-${{ matrix.platform }}
           path: |
             dist/${{ matrix.bin }}
-            dist/mossterm-${{ matrix.os }}.*
-          if-no-files-found: warn
+            dist/mossterm-${{ matrix.platform }}.*
+          if-no-files-found: error

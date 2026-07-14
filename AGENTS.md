@@ -18,25 +18,26 @@
 
 ## 📊 当前进度
 
-- **最新 tag**: v0.5.3（SFTP 客户端分页 + 拖拽上传）
-- **最新 commit**: `f5ad754`
+- **最新 tag**: v0.5.4（CI/CD 修订：ci.yml + release.yml）
+- **最新 commit**: 见 `git log --oneline -1`（提交后回填 hash）
 - **分支**: main
 - **可执行二进制**: `/tmp/mossterm-v053-final` (7.64 MB ARM64)
 - **测试**: 128/129 通过 + 1 SKIP（race detector 干净，+34 PASS vs v0.5.2）
 - **真实 build 需要**: `cp -R` 到 `/tmp/MossTerm_test` 后跑 `go build`（Documents 目录沙盒限制）
+- **CI/CD**: `.github/workflows/{ci,release}.yml` 已修订 — push/PR 跑 CI，tag `v*` 自动发版
 
 ## 🛣️ 下一步候选
 
 | 版本 | 内容 | 难度 |
 |---|---|---|
-| v0.5.4 | profile 编辑 UI（manager 早好了只差前端） | 中 |
-| v0.5.4 | SFTP binary preview（图片 / PDF 缩略） | 中 |
-| v0.5.4 | SFTP 集成到 Pane 树（双 pane: 左 SSH / 右 SFTP） | 中 |
+| v0.5.5 | profile 编辑 UI（manager 早好了只差前端） | 中 |
+| v0.5.5 | SFTP binary preview（图片 / PDF 缩略） | 中 |
+| v0.5.5 | SFTP 集成到 Pane 树（双 pane: 左 SSH / 右 SFTP） | 中 |
+| v0.6.0 | macOS code signing + 公证 | 中 |
 | v0.6.0 | 跳板链 (multi-hop) | 大 |
 | v0.6.0 | 端口转发 (local/remote forward) | 大 |
 | v0.6.0 | SFTP streaming upload（>100MB 分片上传） | 中 |
 | v0.6.0 | x/crypto 升级到 v0.31+（社区版已稳定 argon2） | 小 |
-| v0.6.0 | Wails v2 → v3（如有重大收益） | 中 |
 
 ## ⚠️ 不要踩的坑
 
