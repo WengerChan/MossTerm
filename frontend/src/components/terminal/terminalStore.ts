@@ -6,7 +6,7 @@
  * 它由 Terminal.tsx 用 ref 持有，store 只保存可序列化的元数据。
  */
 import { create } from "zustand";
-import type { SessionID, PTYSize } from "@types/session";
+import type { SessionID, PTYSize } from "@/types/session";
 
 export type TerminalTheme = "moss-dark" | "moss-light" | "solarized-dark";
 
@@ -68,12 +68,18 @@ export const useTerminalStore = create<TerminalState>((set) => ({
   metas: {},
 
   ensureConfig: (id) => {
-    let cfg = useTerminalStore.getState().configs[id];
-    if (!cfg) {
-      cfg = DEFAULT_CONFIG;
-      set((s) => ({ configs: { ...s.configs, [id]: cfg! } }));
-    }
-    return cfg;
+    // v0.5.7: 用 set 的 get() 闭包代替 useTerminalStore.getState()，避免
+    // create<T>() 返回类型在自引用时推不出（TS7022 / TS7023）。
+    let cfg: TerminalConfig | undefined;
+    set((s) => {
+      cfg = s.configs[id];
+      if (!cfg) {
+        cfg = DEFAULT_CONFIG;
+        return { configs: { ...s.configs, [id]: cfg } };
+      }
+      return {};
+    });
+    return cfg!;
   },
 
   updateConfig: (id, patch) =>

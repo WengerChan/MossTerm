@@ -18,12 +18,7 @@ if (import.meta.env.DEV) {
 }
 
 // Wails webview 就绪后会注入 window.runtime / window.go
-// 这里做个空操作占位，避免 TS 报"未使用"
-declare global {
-  interface Window {
-    runtime?: import("@wails/runtime/runtime").WailsRuntime;
-  }
-}
+// type 由 wailsjs/runtime/runtime.d.ts 全局 declare，不重复声明
 
 const root = document.getElementById("root");
 if (!root) {

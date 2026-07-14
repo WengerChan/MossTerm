@@ -53,16 +53,16 @@ function emitToConsole(payload: LogPayload): void {
 /**
  * 内部：转发到 Wails runtime（v0.2+ 启用）
  */
-function emitToWails(payload: LogPayload): void {
+function emitToWails(_payload: LogPayload): void {
   if (!inWails) return;
-  // TODO: 真实启用
+  // TODO: 真实启用（v0.6+）
   // const r = window.runtime;
-  // switch (payload.level) {
-  //   case "trace": r.LogTrace(payload.msg); break;
-  //   case "debug": r.LogDebug(payload.msg); break;
-  //   case "info":  r.LogInfo(payload.msg);  break;
-  //   case "warn":  r.LogWarning(payload.msg); break;
-  //   case "error": r.LogError(payload.msg); break;
+  // switch (_payload.level) {
+  //   case "trace": r.LogTrace(_payload.msg); break;
+  //   case "debug": r.LogDebug(_payload.msg); break;
+  //   case "info":  r.LogInfo(_payload.msg);  break;
+  //   case "warn":  r.LogWarning(_payload.msg); break;
+  //   case "error": r.LogError(_payload.msg); break;
   // }
 }
 

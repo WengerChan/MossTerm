@@ -15,7 +15,7 @@ import clsx from "clsx";
 import { useConnectionStore } from "@stores/connectionStore";
 import { useSessionStore } from "./sessionStore";
 import { useUIStore } from "@stores/uiStore";
-import type { Profile } from "@types/session";
+import type { Profile } from "@/types/session";
 
 export function SessionTree(): JSX.Element {
   const profiles    = useConnectionStore((s) => s.profiles);

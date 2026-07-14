@@ -12,8 +12,8 @@ import { useCallback, useEffect, useRef } from "react";
 import type { Terminal as XTerminal } from "@xterm/xterm";
 import { useTerminalStore } from "@components/terminal/terminalStore";
 import { useWailsEvent } from "@hooks/useWailsEvent";
-import { EventTopic, type SessionDataEvent } from "@types/events";
-import type { SessionID, PTYSize } from "@types/session";
+import { EventTopic, type SessionDataEvent } from "@/types/events";
+import type { SessionID, PTYSize } from "@/types/session";
 import { logger } from "@utils/logger";
 
 export interface UseTerminalOptions {

@@ -22,7 +22,7 @@
  */
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
-import type { SessionID, ProfileID } from "@types/session";
+import type { SessionID, ProfileID } from "@/types/session";
 
 // =====================================================================
 // Pane 树类型
@@ -209,7 +209,7 @@ function closePaneInTree(panes: Pane[], targetId: string): Pane[] | null {
 // store impl
 // =====================================================================
 export const useTabsStore = create<TabsState>()(
-  subscribeWithSelector((set, get) => ({
+  subscribeWithSelector((set) => ({
     tabs: [],
     activeTabId: null,
 

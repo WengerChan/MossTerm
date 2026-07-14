@@ -59,7 +59,7 @@ import { useUIStore } from "@stores/uiStore";
 import { useConnectionStore } from "@stores/connectionStore";
 import { formatBytes } from "@utils/format";
 import { logger } from "@utils/logger";
-import type { SessionID } from "@types/session";
+import type { SessionID } from "@/types/session";
 
 // =====================================================================
 // Constants
@@ -188,7 +188,9 @@ export function SftpBrowser({ open, onClose, sessionID }: SftpBrowserProps): JSX
   // 目录状态
   const [path, setPath] = useState<string>("/");
   const [entries, setEntries] = useState<Entry[]>([]);
-  const [loading, setLoading] = useState(false);
+  // v0.5.7: 改 string|null —— 既要承载 listDir 的"加载中"提示，
+  // 又要承载 drag-drop upload 的"Uploading <name>..." 文本。
+  const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
 
@@ -242,7 +244,7 @@ export function SftpBrowser({ open, onClose, sessionID }: SftpBrowserProps): JSX
     async (target: string) => {
       if (!sessionID) return;
       const token = ++reqTokenRef.current;
-      setLoading(true);
+      setLoading("Loading...");
       setError(null);
       try {
         const page: ListPage = await App.SftpList(sessionID, target, LIST_PAGE_SIZE, "");
@@ -256,7 +258,7 @@ export function SftpBrowser({ open, onClose, sessionID }: SftpBrowserProps): JSX
         setError(msg);
         setEntries([]);
       } finally {
-        if (token === reqTokenRef.current) setLoading(false);
+        if (token === reqTokenRef.current) setLoading(null);
       }
     },
     [sessionID],
@@ -572,7 +574,7 @@ export function SftpBrowser({ open, onClose, sessionID }: SftpBrowserProps): JSX
         <div className="flex items-center gap-2 border-b border-moss-border bg-moss-bg px-3 py-2 text-xs">
           <button
             onClick={cdUp}
-            disabled={loading || parentPath(path) === null}
+            disabled={!!loading || parentPath(path) === null}
             className="rounded border border-moss-border bg-moss-surface p-1 text-ink-muted hover:bg-moss-hover hover:text-ink disabled:opacity-40"
             title="上一级"
             aria-label="上一级"
@@ -581,7 +583,7 @@ export function SftpBrowser({ open, onClose, sessionID }: SftpBrowserProps): JSX
           </button>
           <button
             onClick={refresh}
-            disabled={loading}
+            disabled={!!loading}
             className="rounded border border-moss-border bg-moss-surface p-1 text-ink-muted hover:bg-moss-hover hover:text-ink disabled:opacity-40"
             title="刷新"
             aria-label="刷新"
@@ -590,7 +592,7 @@ export function SftpBrowser({ open, onClose, sessionID }: SftpBrowserProps): JSX
           </button>
           <button
             onClick={promptMkdir}
-            disabled={loading}
+            disabled={!!loading}
             className="inline-flex items-center gap-1 rounded border border-moss-border bg-moss-surface px-2 py-1 text-ink-muted hover:bg-moss-hover hover:text-ink disabled:opacity-40"
             title="新建文件夹"
           >

@@ -9,8 +9,8 @@ import clsx from "clsx";
 import { useSftpStore } from "./sftpStore";
 import { useUIStore } from "@stores/uiStore";
 import { formatBytes, formatAbsoluteTime } from "@utils/format";
-import type { SftpEntry as Entry } from "@types/sftp";
-import type { SessionID } from "@types/session";
+import type { SftpEntry as Entry } from "@/types/sftp";
+import type { SessionID } from "@/types/session";
 
 export interface FileListProps {
   sessionId: SessionID;

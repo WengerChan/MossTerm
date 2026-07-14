@@ -5,7 +5,7 @@
  * 让 SessionForm 和 SessionTree 不直接耦合全局 store。
  */
 import { create } from "zustand";
-import type { Profile, ProfileID, AuthKind } from "@types/session";
+import type { Profile, ProfileID, AuthKind } from "@/types/session";
 import { useUIStore } from "@stores/uiStore";
 
 // v0.5.6: startCreate / startEdit 现在会 open profile-edit modal

@@ -14,7 +14,7 @@ import { useSessionStore } from "./sessionStore";
 import { useConnectionStore } from "@stores/connectionStore";
 import { useUIStore } from "@stores/uiStore";
 import { Button } from "@components/common/Button";
-import type { AuthKind, Profile } from "@types/session";
+import type { AuthKind, Profile } from "@/types/session";
 
 const AUTH_OPTIONS: { kind: AuthKind; label: string; icon: React.ReactNode }[] = [
   { kind: "password",             label: "密码",   icon: <Lock size={12} /> },

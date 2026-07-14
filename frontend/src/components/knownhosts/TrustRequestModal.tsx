@@ -20,7 +20,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Check, Copy, Shield, ShieldOff, X } from "lucide-react";
 import { useWailsEvent } from "@hooks/useWailsEvent";
 import { useUIStore } from "@stores/uiStore";
-import { EventTopic, type TrustRequestEvent } from "@types/events";
+import { EventTopic, type TrustRequestEvent } from "@/types/events";
 import { App } from "@wails/go/main/App";
 
 /** 复制按钮的"已复制"反馈持续时间（ms）。 */

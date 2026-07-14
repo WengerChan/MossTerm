@@ -32,14 +32,15 @@ go.work.sum
 
 # ---------- Node / 前端 / Wails ----------
 node_modules/
-# frontend/dist/ 目录本身保留（占位 index.html 让 go embed 编译过）；
+# frontend/dist/ 目录保留（占位 index.html 让 go embed 编译过）；
 # wails dev/build 会覆盖里面内容。
+# 注意：assets/ 来自 vite build，是构建产物（不提交）
 !/frontend/dist/
 !/frontend/dist/index.html
-# cmd/mossterm/frontend/dist/ —— v0.5.0 起 main.go 的 //go:embed 路径
-# （相对 main.go 所在目录）。同样放占位让 `go build` 能过。
-!/cmd/mossterm/frontend/dist/
-!/cmd/mossterm/frontend/dist/index.html
+/frontend/dist/assets/
+# v0.5.7 起 main.go 移到项目根，//go:embed 路径变成 ./frontend/dist
+# （上面那几行就够了）。`wails build` 写到 .wails-bindings/（git ignored）。
+/frontend/.wails-bindings/
 /frontend/build/
 /frontend/node_modules/
 /frontend/.vite/

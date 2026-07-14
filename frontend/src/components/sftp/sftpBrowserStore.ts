@@ -17,7 +17,7 @@
  *     不需要外部 selector 跨 store 联动
  */
 import { create } from "zustand";
-import type { SessionID } from "@types/session";
+import type { SessionID } from "@/types/session";
 
 export interface SftpBrowserState {
   isOpen: boolean;

@@ -17,9 +17,9 @@ import {
   EventTopic,
   type SessionStateEvent,
   type SessionExitEvent,
-} from "@types/events";
-import type { SessionState } from "@types/session";
-import { ACTIVE_STATES } from "@types/session";
+} from "@/types/events";
+import type { SessionState } from "@/types/session";
+import { ACTIVE_STATES } from "@/types/session";
 
 const RAW_TO_STATE: Record<string, SessionState> = {
   connecting:      "connecting",

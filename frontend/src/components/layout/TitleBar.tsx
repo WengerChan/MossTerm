@@ -27,10 +27,10 @@ export function TitleBar({ title = "MossTerm" }: TitleBarProps): JSX.Element {
     activeSid ? s.sessions[activeSid] : undefined,
   );
 
-  // 通知 Wails 同步窗口标题
+  // 通知 Wails 同步窗口标题（v0.5.7: 暂未接通 Wails runtime，TODO 留到 v0.6）
   useEffect(() => {
-    const t = session ? `${session.name} — ${title}` : title;
-    // TODO: window.runtime?.WindowSetTitle(t);
+    // const t = session ? `${session.name} — ${title}` : title;
+    // window.runtime?.WindowSetTitle(t);
   }, [title, session]);
 
   return (

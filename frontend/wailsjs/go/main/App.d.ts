@@ -13,11 +13,11 @@
  */
 export class App {
   // 会话管理
-  static ListSessions(): Promise<import("@types/session").SessionInfo[]>;
-  static OpenSession(req: import("@types/session").OpenRequest): Promise<import("@types/session").SessionID>;
-  static CloseSession(id: import("@types/session").SessionID, force?: boolean): Promise<void>;
-  static SendInput(id: import("@types/session").SessionID, data: Uint8Array): Promise<void>;
-  static ResizePTY(id: import("@types/session").SessionID, cols: number, rows: number): Promise<void>;
+  static ListSessions(): Promise<import("@/types/session").SessionInfo[]>;
+  static OpenSession(req: import("@/types/session").OpenRequest): Promise<import("@/types/session").SessionID>;
+  static CloseSession(id: import("@/types/session").SessionID, force?: boolean): Promise<void>;
+  static SendInput(id: import("@/types/session").SessionID, data: Uint8Array): Promise<void>;
+  static ResizePTY(id: import("@/types/session").SessionID, cols: number, rows: number): Promise<void>;
 
   // 配置
   static GetConfig(): Promise<unknown>;
@@ -28,9 +28,9 @@ export class App {
   // 类型镜像 internal/config/manager.go 的 Profile 结构（前端 @types/session.ts）。
   // SaveProfile 走 ID 区分 add/update：p.id 空 → AddProfile；非空 → UpdateProfile。
   // deleteProfile 无返回值，错误经 try/catch 进 error state。
-  static ListProfiles(): Promise<import("@types/session").Profile[]>;
-  static SaveProfile(p: import("@types/session").Profile): Promise<void>;
-  static DeleteProfile(id: import("@types/session").ProfileID): Promise<void>;
+  static ListProfiles(): Promise<import("@/types/session").Profile[]>;
+  static SaveProfile(p: import("@/types/session").Profile): Promise<void>;
+  static DeleteProfile(id: import("@/types/session").ProfileID): Promise<void>;
 
   // 凭据
   static ListSecrets(): Promise<unknown[]>;

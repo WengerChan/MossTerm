@@ -18,8 +18,8 @@
 
 ## 📊 当前进度
 
-- **最新 tag**: v0.5.6（Profile 编辑 UI 完整流程接通）
-- **最新 commit**: `185a002`
+- **最新 tag**: v0.5.7（CI 真正绿 + 项目根 main.go）
+- **最新 commit**: `7f05ac7`
 - **分支**: main
 - **可执行二进制**: `/tmp/mossterm-v053-final` (7.64 MB ARM64)
 - **测试**: 128/129 通过 + 1 SKIP（race detector 干净，+34 PASS vs v0.5.2）

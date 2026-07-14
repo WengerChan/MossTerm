@@ -24,8 +24,8 @@ import "@xterm/xterm/css/xterm.css";
 
 import { useTerminalStore } from "@components/terminal/terminalStore";
 import { useWailsEvent } from "@hooks/useWailsEvent";
-import { EventTopic, type SessionDataEvent } from "@types/events";
-import type { SessionID, PTYSize } from "@types/session";
+import { EventTopic, type SessionDataEvent } from "@/types/events";
+import type { SessionID, PTYSize } from "@/types/session";
 import { logger } from "@utils/logger";
 
 /**

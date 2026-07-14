@@ -6,8 +6,8 @@
  */
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
-import type { Profile, ProfileID, SessionID, SessionInfo } from "@types/session";
-import { ACTIVE_STATES } from "@types/session";
+import type { Profile, ProfileID, SessionID, SessionInfo } from "@/types/session";
+import { ACTIVE_STATES } from "@/types/session";
 import { logger } from "@utils/logger";
 // v0.5.5: 接入 wails 真实 binding —— App.d.ts 在 wailsjs 目录下 stub ，
 // 真实运行时由 wails CLI 注入。这里 import 仅供 typecheck 通过 + 编译期守卫。

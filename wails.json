@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "mossterm",
+  "outputfilename": "mossterm",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "wailsjsdir": "./frontend/.wails-bindings",
+  "author": {
+    "name": "MossTerm"
+  },
+  "info": {
+    "productName": "MossTerm",
+    "companyName": "MossTerm",
+    "productVersion": "0.5.7",
+    "comments": "Modular Open SSH Solutions · Terminal"
+  }
+}

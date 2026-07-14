@@ -4,8 +4,8 @@
  * 占位实现，定义 list / upload / download / jobs 的 state shape。
  */
 import { create } from "zustand";
-import type { SessionID } from "@types/session";
-import type { SftpEntry, SftpListPage, TransferJob } from "@types/sftp";
+import type { SessionID } from "@/types/session";
+import type { SftpEntry, TransferJob } from "@/types/sftp";
 
 export interface SftpPanelState {
   /** session 维度：每个 session 一棵"目录树"缓存 */
@@ -39,7 +39,7 @@ const initial: SftpPanelState = {
   busyPaths: {},
 };
 
-export const useSftpStore = create<SftpState>((set, get) => ({
+export const useSftpStore = create<SftpState>((set) => ({
   ...initial,
 
   listDir: async (_sid, _path, _reset) => {

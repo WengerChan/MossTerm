@@ -27,7 +27,6 @@
       "@components/*": ["src/components/*"],
       "@stores/*": ["src/stores/*"],
       "@hooks/*": ["src/hooks/*"],
-      "@types/*": ["src/types/*"],
       "@utils/*": ["src/utils/*"],
       "@styles/*": ["src/styles/*"],
       "@wails/*": ["wailsjs/*"]
