@@ -35,6 +35,11 @@ export const useAppStore = create<AppState>((set) => ({
   init: async () => {
     if (useAppStore.getState().initialized) return;
     try {
+      // v0.5.6: 启动时拉 profile 列表（v0.5.5 之前 stub 没接）
+      // useConnectionStore 是动态 import 避免循环依赖（appStore 已被 connectionStore 间接依赖）
+      const { useConnectionStore } = await import("@stores/connectionStore");
+      await useConnectionStore.getState().refreshProfiles();
+
       // TODO: 调用 wails backend 拉取环境信息
       // const env = await window.runtime.Environment();
       // set({ platform: env.platform as Platform });

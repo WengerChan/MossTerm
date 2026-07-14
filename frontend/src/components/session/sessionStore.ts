@@ -6,6 +6,11 @@
  */
 import { create } from "zustand";
 import type { Profile, ProfileID, AuthKind } from "@types/session";
+import { useUIStore } from "@stores/uiStore";
+
+// v0.5.6: startCreate / startEdit 现在会 open profile-edit modal
+//（避免调用方还要再 openModal 一次）。字符串字面量避免循环依赖。
+const PROFILE_EDIT_MODAL_ID = "profile-edit";
 
 export interface ProfileGroup {
   name: string;
@@ -60,17 +65,26 @@ export const useSessionStore = create<SessionUIState>((set) => ({
   },
   groups: [],
 
-  startCreate: () =>
+  startCreate: () => {
+    // v0.5.6: 同时打开 profile-edit modal + init 表单
+    //（避免调用方再 openModal 一次 —— 单一来源）
     set({
       form: {
-        draft: { ...emptyProfile(), id: `tmp-${Date.now()}`, createdAt: Date.now(), updatedAt: Date.now() },
+        // id="" 触发后端 SaveProfile 走 AddProfile 路径
+        draft: { ...emptyProfile(), id: "", createdAt: Date.now(), updatedAt: Date.now() },
         dirty: false,
         selectedGroup: null,
         searchKeyword: "",
       },
-    }),
+    });
+    useUIStore.getState().openModal({
+      id: PROFILE_EDIT_MODAL_ID,
+      title: "新建 profile",
+      componentKey: "ProfileEdit",
+    });
+  },
 
-  startEdit: (p) =>
+  startEdit: (p) => {
     set({
       form: {
         draft: { ...p },
@@ -78,7 +92,13 @@ export const useSessionStore = create<SessionUIState>((set) => ({
         selectedGroup: null,
         searchKeyword: "",
       },
-    }),
+    });
+    useUIStore.getState().openModal({
+      id: PROFILE_EDIT_MODAL_ID,
+      title: `编辑 profile：${p.name}`,
+      componentKey: "ProfileEdit",
+    });
+  },
 
   updateDraft: (patch) =>
     set((s) => ({

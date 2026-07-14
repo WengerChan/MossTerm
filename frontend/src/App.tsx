@@ -10,6 +10,8 @@ import { CommandPalette } from "@components/palette/CommandPalette";
 import { TrustRequestModal } from "@components/knownhosts/TrustRequestModal";
 import { SftpBrowser } from "@components/sftp/SftpBrowser";
 import { useSftpBrowserStore } from "@components/sftp/sftpBrowserStore";
+import { ProfileEditModal } from "@components/session/ProfileEditModal";
+import { ConfirmDeleteProfile } from "@components/session/ConfirmDeleteProfile";
 import { useAppStore } from "@stores/appStore";
 import { useUIStore } from "@stores/uiStore";
 
@@ -53,6 +55,14 @@ export default function App(): JSX.Element {
         sessionID={sftpSid}
         onClose={sftpClose}
       />
+
+      {/*
+       * v0.5.6 Profile 编辑 modal（包 SessionForm）+ 删除确认 modal。
+       * 都用 useUIStore.modal.id 匹配 + 自己判断是否渲染。
+       * 触发链：Sidebar "+" / SessionTree hover 编辑/删除按钮 → sessionStore.startCreate / startEdit / openModal。
+       */}
+      <ProfileEditModal />
+      <ConfirmDeleteProfile />
     </div>
   );
 }

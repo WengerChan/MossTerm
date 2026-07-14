@@ -81,7 +81,9 @@ export function SessionTree(): JSX.Element {
                   onEdit={() => startEdit(p)}
                   onDelete={() =>
                     openModal({
-                      id: `delete-profile-${p.id}`,
+                      // v0.5.6: 用单 modal 槽位 + 透传 profileId props
+                      //（之前每次删都建新 id 会出现多个 delete-profile modal 槽位 bug）
+                      id: "confirm-delete-profile",
                       title: `删除 profile "${p.name}"?`,
                       componentKey: "ConfirmDeleteProfile",
                       props: { profileId: p.id },

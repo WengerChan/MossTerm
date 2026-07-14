@@ -18,7 +18,7 @@
 
 ## 📊 当前进度
 
-- **最新 tag**: v0.5.5（Profile CRUD 接通真实 wails binding）
+- **最新 tag**: v0.5.6（Profile 编辑 UI 完整流程接通）
 - **最新 commit**: `7f05ac7`
 - **分支**: main
 - **可执行二进制**: `/tmp/mossterm-v053-final` (7.64 MB ARM64)
