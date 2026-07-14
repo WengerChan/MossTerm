@@ -19,7 +19,7 @@
 ## 📊 当前进度
 
 - **最新 tag**: v0.5.0（SFTP + 多 tab + 首次信任 GUI）
-- **最新 commit**: 见 `git log --oneline -1`（提交后回填 hash）
+- **最新 commit**: `a4a6ef6`
 - **分支**: main
 - **可执行二进制**: `/tmp/mossterm-v050` (7.51 MB ARM64)
 - **测试**: 55/55 通过（race detector 干净）
