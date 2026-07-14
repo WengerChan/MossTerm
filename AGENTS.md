@@ -19,7 +19,7 @@
 ## 📊 当前进度
 
 - **最新 tag**: v0.5.1（SFTP 浏览器前端 + 后端 wailsbindings）
-- **最新 commit**: 见 `git log --oneline -1`（提交后回填 hash）
+- **最新 commit**: `2069ccf`
 - **分支**: main
 - **可执行二进制**: `/tmp/mossterm-v051` (7.64 MB ARM64)
 - **测试**: 63/63 通过（race detector 干净，+8 vs v0.5.0）
