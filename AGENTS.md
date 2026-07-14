@@ -18,7 +18,7 @@
 
 ## 📊 当前进度
 
-- **最新 tag**: v0.5.4（CI/CD 修订：ci.yml + release.yml）
+- **最新 tag**: v0.5.5（Profile CRUD 接通真实 wails binding）
 - **最新 commit**: 见 `git log --oneline -1`（提交后回填 hash）
 - **分支**: main
 - **可执行二进制**: `/tmp/mossterm-v053-final` (7.64 MB ARM64)

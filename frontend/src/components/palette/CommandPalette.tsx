@@ -41,7 +41,7 @@ export function CommandPalette(): JSX.Element {
   const setActive   = useConnectionStore((s) => s.setActiveSession);
 
   const [query, setQuery]     = useState("");
-  const [activeIdx, setActive] = useState(0);
+  const [activeIdx, setActiveIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef  = useRef<HTMLUListElement | null>(null);
 
@@ -116,7 +116,7 @@ export function CommandPalette(): JSX.Element {
   // 自动 focus & 选中第一条
   useEffect(() => {
     inputRef.current?.focus();
-    setActive(0);
+    setActiveIdx(0);
   }, []);
 
   // Esc 关闭
@@ -138,10 +138,10 @@ export function CommandPalette(): JSX.Element {
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActive((i) => Math.min(i + 1, filtered.length - 1));
+      setActiveIdx((i) => Math.min(i + 1, filtered.length - 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActive((i) => Math.max(i - 1, 0));
+      setActiveIdx((i) => Math.max(i - 1, 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
       const it = filtered[activeIdx];
@@ -190,7 +190,7 @@ export function CommandPalette(): JSX.Element {
               <li
                 key={it.id}
                 data-idx={idx}
-                onMouseEnter={() => setActive(idx)}
+                onMouseEnter={() => setActiveIdx(idx)}
                 onClick={() => void execute(it)}
                 className={clsx(
                   "flex cursor-pointer items-center gap-2 px-3 py-1.5",

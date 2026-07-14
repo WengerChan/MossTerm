@@ -9,6 +9,10 @@ import { subscribeWithSelector } from "zustand/middleware";
 import type { Profile, ProfileID, SessionID, SessionInfo } from "@types/session";
 import { ACTIVE_STATES } from "@types/session";
 import { logger } from "@utils/logger";
+// v0.5.5: 接入 wails 真实 binding —— App.d.ts 在 wailsjs 目录下 stub ，
+// 真实运行时由 wails CLI 注入。这里 import 仅供 typecheck 通过 + 编译期守卫。
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { App } from "@wails/go/main/App";
 
 export interface ConnectionState {
   // ===== state =====
@@ -58,14 +62,12 @@ export const useConnectionStore = create<ConnectionState>()(
     refreshProfiles: async () => {
       set({ loading: true, error: null });
       try {
-        // TODO: 调用 wails backend 拉取 profile 列表
-        // const list = await Api.ListProfiles();
-        // const profiles: Record<ProfileID, Profile> = {};
-        // const profileOrder: ProfileID[] = [];
-        // for (const p of list) { profiles[p.id] = p; profileOrder.push(p.id); }
-        // set({ profiles, profileOrder, loading: false });
-        logger.debug("[connectionStore] refreshProfiles called");
-        set({ loading: false });
+        // v0.5.5: 真实调 wails binding
+        const list = await App.ListProfiles();
+        const profiles: Record<ProfileID, Profile> = {};
+        const profileOrder: ProfileID[] = [];
+        for (const p of list) { profiles[p.id] = p; profileOrder.push(p.id); }
+        set({ profiles, profileOrder, loading: false });
       } catch (err: unknown) {
         logger.error(`[connectionStore] refreshProfiles: ${String(err)}`);
         set({ error: String(err), loading: false });
@@ -74,7 +76,8 @@ export const useConnectionStore = create<ConnectionState>()(
 
     saveProfile: async (p) => {
       try {
-        // TODO: await Api.SaveProfile(p);
+        // v0.5.5: 持久化到后端 config
+        await App.SaveProfile(p);
         set((s) => {
           const profiles = { ...s.profiles, [p.id]: p };
           const order = s.profileOrder.includes(p.id)
@@ -90,7 +93,8 @@ export const useConnectionStore = create<ConnectionState>()(
 
     deleteProfile: async (id) => {
       try {
-        // TODO: await Api.DeleteProfile(id);
+        // v0.5.5: 后端删 + 本地 state 同步
+        await App.DeleteProfile(id);
         set((s) => {
           const profiles = { ...s.profiles };
           delete profiles[id];
@@ -107,25 +111,36 @@ export const useConnectionStore = create<ConnectionState>()(
 
     refreshSessions: async () => {
       try {
-        // TODO: const list = await Api.ListSessions();
-        // const sessions: Record<SessionID, SessionInfo> = {};
-        // for (const s of list) sessions[s.id] = s;
-        // set({ sessions });
-        logger.debug("[connectionStore] refreshSessions called");
+        // v0.5.5: 从 wailsbinding 拉 session 列表
+        const list = await App.ListSessions();
+        const sessions: Record<SessionID, SessionInfo> = {};
+        for (const s of list) sessions[s.id] = s;
+        set({ sessions });
       } catch (err: unknown) {
         logger.error(`[connectionStore] refreshSessions: ${String(err)}`);
         set({ error: String(err) });
       }
     },
 
-    openSession: async (_profileId) => {
+    openSession: async (profileId) => {
       try {
-        // TODO: const id = await Api.OpenSession({ ... });
-        // await get().refreshSessions();
-        // return id;
-        const fakeId: SessionID = "stub-session-id";
-        set({ activeSessionId: fakeId });
-        return fakeId;
+        // v0.5.5: 用 profile 调真实 OpenSession
+        const p = get().profiles[profileId];
+        if (!p) {
+          throw new Error(`[connectionStore] openSession: profile not found: ${profileId}`);
+        }
+        const id = await App.OpenSession({
+          profileId: p.id,
+          host: p.host,
+          port: p.port,
+          user: p.user,
+          auth: p.auth,
+          cols: 80,
+          rows: 24,
+        });
+        await get().refreshSessions();
+        set({ activeSessionId: id });
+        return id;
       } catch (err: unknown) {
         logger.error(`[connectionStore] openSession: ${String(err)}`);
         set({ error: String(err) });
@@ -135,7 +150,8 @@ export const useConnectionStore = create<ConnectionState>()(
 
     closeSession: async (id, force = false) => {
       try {
-        // TODO: await Api.CloseSession(id, force);
+        // v0.5.5: 真实调 CloseSession
+        await App.CloseSession(id, force);
         get().removeSession(id);
         if (get().activeSessionId === id) {
           set({ activeSessionId: null });

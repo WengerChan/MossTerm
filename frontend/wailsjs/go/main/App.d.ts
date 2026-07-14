@@ -23,6 +23,15 @@ export class App {
   static GetConfig(): Promise<unknown>;
   static UpdateConfig(mutate: (cfg: unknown) => void): Promise<void>;
 
+  // v0.5.5 Profile CRUD —— 接通 v0.1 留的后端 ListProfiles/SaveProfile/DeleteProfile。
+  // 后端实现：internal/ui/wailsbindings/api.go: ListProfiles/SaveProfile/DeleteProfile。
+  // 类型镜像 internal/config/manager.go 的 Profile 结构（前端 @types/session.ts）。
+  // SaveProfile 走 ID 区分 add/update：p.id 空 → AddProfile；非空 → UpdateProfile。
+  // deleteProfile 无返回值，错误经 try/catch 进 error state。
+  static ListProfiles(): Promise<import("@types/session").Profile[]>;
+  static SaveProfile(p: import("@types/session").Profile): Promise<void>;
+  static DeleteProfile(id: import("@types/session").ProfileID): Promise<void>;
+
   // 凭据
   static ListSecrets(): Promise<unknown[]>;
   static GetSecretContent(id: string): Promise<string>;
