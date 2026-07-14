@@ -382,6 +382,23 @@ func (s *sessionImpl) State() State {
 	return State(s.state.Load())
 }
 
+// Connector 返回构造本 Session 时使用的 connect.Connector。
+//
+// v0.5.1 新增（v0.5.1 之前是 unexported 字段 conn）：同模块其他包（典型：
+// internal/app 的 sftpFor 路径）需要拿到 connector 来开 SFTP subsystem
+// 等共享 SSH 连接的子系统。
+//
+// 返回值与 Open 时的 connector 完全等价，调用方可安全 type assert 回
+// 具体类型（*sshclient.Connector 等）。
+//
+// 生命周期：Connector 引用与 Session 生命周期独立 —— Session Close 不会
+// 调 Connector.Close（sshclient 文档明确：Connector 是 long-lived singleton，
+// Close 只关 keepalive，不应随 Session 关闭）。具体协议层资源（*ssh.Client /
+// *sshConn）由 Session 内部 connMu 保护，Close 路径会释放。
+func (s *sessionImpl) Connector() connect.Connector {
+	return s.conn
+}
+
 // -----------------------------------------------------------------------------
 // 内部：状态 / 发布 / 广播
 // -----------------------------------------------------------------------------

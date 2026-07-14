@@ -36,6 +36,9 @@ import (
 //   - done / closeOnce：keepalive 协程退出信号（v0.1.4+）。
 //     Connector 是 long-lived singleton；Close 一次性 close(done) 让所有
 //     在飞的 keepalive 协程退出。closeOnce 保证 Close 幂等。
+//   - client：当前已 Dial 成功的 *ssh.Client（v0.5.1+，供 SFTP subsystem
+//     等共享 SSH 连接的子系统复用）。nil 表示还没 Dial 成功或最后一次
+//     Dial 已关闭；通过 RawClient() 访问。
 type Connector struct {
 	hostKeyCb   connect.HostKeyCallback
 	bannerCb    connect.BannerCallback
@@ -46,6 +49,7 @@ type Connector struct {
 	signerCache *lru.Cache[string, ssh.Signer]
 	done        chan struct{}
 	closeOnce   sync.Once
+	client      *ssh.Client
 }
 
 // New 构造一个 SSH Connector。
@@ -177,6 +181,12 @@ func (c *Connector) Dial(ctx context.Context, params connect.DialParams) (net.Co
 	}
 	client := ssh.NewClient(clientConn, chans, reqs)
 
+	// v0.5.1+：把 client 存到 Connector 上，供 RawClient() 暴露给
+	// SFTP subsystem 等共享 SSH 连接的子系统。注意：sftpclient.Open
+	// 会另起一个 SFTP channel（独立 ID），不影响 client 本身的活跃性。
+	// 旧 client 在下一次 Dial 成功时被覆盖；Connector 内部不维护历史。
+	c.client = client
+
 	// 阶段 3：启动 keepalive（v0.1.4+）。
 	//
 	// 目的：消除长 idle 时被中间设备单方面断开的风险。
@@ -260,13 +270,13 @@ func (c *Connector) OpenSession(ctx context.Context, conn net.Conn, opts connect
 		}
 	}
 
-	// 启动用户 shell。失败时仍然让 caller 拿到错误，但内部已 Close。
-	if err := sess.Shell(); err != nil {
-		return nil, fmt.Errorf("sshclient.OpenSession: Shell: %w", err)
-	}
-
 	// 把 SSH session 的 stdin/stdout 暴露成 io.ReadWriter。
-	// *ssh.Session 本身不实现 ReadWriteCloser，需要手动包一层。
+	//
+	// **顺序关键**：必须在 Shell() 之前调。
+	// x/crypto/ssh v0.22.0 的 StdinPipe/StdoutPipe 在 s.started==true 时
+	// 返回 "StdinPipe after process started" —— Shell() 会把 started 置 true。
+	// v0.1/v0.5.0 一直写反了，只是没有真 SSH server 的 integration test 触发
+	// 这个错误（v0.5.1 接入 sftpFor 时第一次暴露）。
 	stdin, err := sess.StdinPipe()
 	if err != nil {
 		_ = sess.Close()
@@ -276,6 +286,16 @@ func (c *Connector) OpenSession(ctx context.Context, conn net.Conn, opts connect
 	if err != nil {
 		_ = sess.Close()
 		return nil, fmt.Errorf("sshclient.OpenSession: StdoutPipe: %w", err)
+	}
+
+	// 启动用户 shell。失败时仍然让 caller 拿到错误，但内部已 Close。
+	//
+	// Shell 内部做两件事：(1) 发送 "shell" 请求并等回复；
+	// (2) 调 s.start() 启动 channel → s.Stdin/s.Stdout 的 copy goroutine。
+	// 上面 StdinPipe/StdoutPipe 拿到的 pipe 就是 start() 里要用的；
+	// 先拿 pipe 再 Shell 让 start() 知道走 pipe 而不是默认 bytes.Buffer。
+	if err := sess.Shell(); err != nil {
+		return nil, fmt.Errorf("sshclient.OpenSession: Shell: %w", err)
 	}
 
 	closed = true
@@ -342,6 +362,20 @@ func loadSignerFromBytes(keyBytes []byte, passphrase string) (ssh.Signer, error)
 
 // 编译期断言：*Connector 满足 connect.Connector 接口。
 var _ connect.Connector = (*Connector)(nil)
+
+// RawClient 返回底层 *ssh.Client，供同包内 / 同模块内其他包复用
+// (v0.5.1：internal/app 用它开 SFTP subsystem)。
+//
+// 返回 nil 表示还没 Dial 成功 —— 调用方在拿到底层 client 之前应先
+// 确认当前 session 已 Established（v0.5.1 sftpFor 路径）。
+//
+// 该方法不在 connect.Connector 接口里；它只对具体类型 *sshclient.Connector
+// 可见。其它协议 connector（telnet / serial 等）若要支持 SFTP 等共享 SSH
+// 连接的子系统，各自实现自己的 accessor；这是有意的"按协议暴露专属能力"的设计。
+//
+// 并发安全：只读 *c.client 指针（c.client 只在 Dial 阶段写入、Close 路径不变），
+// 无锁访问安全。Dial 完成后 c.client 不再变。
+func (c *Connector) RawClient() *ssh.Client { return c.client }
 
 // Close 关闭 Connector，停止所有正在运行的 keepalive 协程。
 //

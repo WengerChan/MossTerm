@@ -11,6 +11,8 @@ package session
 import (
 	"context"
 	"errors"
+
+	"github.com/mossterm/mossterm/internal/connect"
 )
 
 // ID 是会话唯一标识，UUID v4 字符串形式。
@@ -150,6 +152,16 @@ type Session interface {
 	Info() Info
 	// State 返回当前状态（原子读）。
 	State() State
+	// Connector 返回构造本 Session 时使用的 connect.Connector。
+	//
+	// 用途（v0.5.1+）：internal/app 拿到 connector 后用 RawClient()
+	// 拿到底层 *ssh.Client，再开 SFTP subsystem 等共享 SSH 连接的子系统。
+	// 返回值与 Open 时的 connector 完全等价，可安全 type assert 回具体类型
+	// （*sshclient.Connector 等）。
+	//
+	// 该方法自 v0.5.1 起作为公开契约的一部分存在；之前是 unexported 字段 conn
+	// （v0.2.0a 引入），通过本方法暴露给同模块其他包使用。
+	Connector() connect.Connector
 }
 
 // ErrInputFull 在 Session.Input 的输入通道已满时返回。

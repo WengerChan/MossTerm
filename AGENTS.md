@@ -18,25 +18,25 @@
 
 ## 📊 当前进度
 
-- **最新 tag**: v0.5.0（SFTP + 多 tab + 首次信任 GUI）
-- **最新 commit**: `a4a6ef6`
+- **最新 tag**: v0.5.1（SFTP 浏览器前端 + 后端 wailsbindings）
+- **最新 commit**: 见 `git log --oneline -1`（提交后回填 hash）
 - **分支**: main
-- **可执行二进制**: `/tmp/mossterm-v050` (7.51 MB ARM64)
-- **测试**: 55/55 通过（race detector 干净）
+- **可执行二进制**: `/tmp/mossterm-v051` (7.64 MB ARM64)
+- **测试**: 63/63 通过（race detector 干净，+8 vs v0.5.0）
 - **真实 build 需要**: `cp -R` 到 `/tmp/MossTerm_test` 后跑 `go build`（Documents 目录沙盒限制）
 
 ## 🛣️ 下一步候选
 
 | 版本 | 内容 | 难度 |
 |---|---|---|
-| v0.5.1 | SFTP 面板 UI（接 `internal/sftpclient`）+ 真实分页 | 中 |
-| v0.5.1 | profile 编辑 UI（已有 manager，缺前端） | 中 |
+| v0.5.2 | SFTP 真实分页（pkg/sftp 替代 ReadDir 模拟） | 中 |
+| v0.5.2 | profile 编辑 UI（manager 早好了只差前端） | 中 |
+| v0.5.2 | SFTP binary preview + 拖拽上传 | 中 |
+| v0.5.2 | v0.5.1 OpenSession 隐 bug 的端到端 integration test 守住 | 小 |
 | v0.5.2 | 并发 trust 场景（`map[requestID]chan TrustReply`） | 小 |
-| v0.5.2 | SFTP 大目录真实分页（`pkg/sftp` 替代） | 中 |
 | v0.6.0 | 跳板链 (multi-hop) | 大 |
 | v0.6.0 | 端口转发 (local/remote forward) | 大 |
-| v0.6.0 | x/crypto 升级到 v0.31+（社区版已稳定 argon2） | 小 |
-| v0.6.0 | Wails v2 → v3（如有重大收益） | 中 |
+| v0.6.0 | SFTP 集成到 Pane 树（双 pane: 左 SSH / 右 SFTP） | 中 |
 
 ## ⚠️ 不要踩的坑
 
@@ -54,6 +54,10 @@
   `io.EOF` 会让 `TestOpen_AsyncReturnsBeforeDial` 再次 fail
 - **mockEmitter FIFO 语义**（`internal/knownhosts/knownhosts_test.go`）：`waitForCall`
   必须 pop 最早一条，**不能**固定返回 `calls[0]` —— 否则多次 emit 后会拿到过期 ID
+- **`OpenSession` 顺序**（`internal/sshclient/client.go`）：`StdinPipe/StdoutPipe` 必须在
+  `Shell()` **之前**调（x/crypto v0.22.0 的 `Session.StdinPipe` 在 `started==true` 后返回
+  error，而 `Shell()` 内部 `s.start()` 会把 `started` 置 true）。v0.1 起就写反了，v0.5.1
+  写 in-process SSH server 才第一次发现
 
 ## 📁 关键目录
 

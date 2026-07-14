@@ -8,6 +8,8 @@ import { useEffect } from "react";
 import { MainLayout } from "@components/layout/MainLayout";
 import { CommandPalette } from "@components/palette/CommandPalette";
 import { TrustRequestModal } from "@components/knownhosts/TrustRequestModal";
+import { SftpBrowser } from "@components/sftp/SftpBrowser";
+import { useSftpBrowserStore } from "@components/sftp/sftpBrowserStore";
 import { useAppStore } from "@stores/appStore";
 import { useUIStore } from "@stores/uiStore";
 
@@ -15,6 +17,11 @@ export default function App(): JSX.Element {
   // 应用启动时拉取一次后端状态
   const initApp = useAppStore((s) => s.init);
   const paletteOpen = useUIStore((s) => s.commandPaletteOpen);
+
+  // v0.5.1：SFTP 浏览器开关（受 sftpBrowserStore 全局控制）
+  const sftpOpen   = useSftpBrowserStore((s) => s.isOpen);
+  const sftpSid    = useSftpBrowserStore((s) => s.sessionID);
+  const sftpClose  = useSftpBrowserStore((s) => s.close);
 
   useEffect(() => {
     void initApp();
@@ -35,6 +42,17 @@ export default function App(): JSX.Element {
        * 与 CommandPalette 一致。v0.5.0 单并发：同一时刻只会显示一个 modal。
        */}
       <TrustRequestModal />
+
+      {/*
+       * v0.5.1 SFTP 浏览器：受 sftpBrowserStore 控制；
+       * open / sessionID / onClose 三件套都从 store 拿。
+       * 挂在 App 顶层（不在 MainLayout 里），与其他 modal 同级。
+       */}
+      <SftpBrowser
+        open={sftpOpen}
+        sessionID={sftpSid}
+        onClose={sftpClose}
+      />
     </div>
   );
 }
