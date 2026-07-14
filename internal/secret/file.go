@@ -25,6 +25,7 @@
 //   - 文件锁（仅单进程安全；多实例并发 Set 可能丢更新）
 //   - 篡改检测后的事务回滚
 //   - 敏感字段二次哈希
+//
 // TODO(security): v1.0 安全审计
 package secret
 
@@ -46,7 +47,6 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-
 // fileStoreFormatVersion 是 on-disk 格式的版本号（写文件时嵌入）。
 const fileStoreFormatVersion = 1
 
@@ -59,7 +59,7 @@ type encryptedFileStore struct {
 
 	// 当前文件内容（解密后）
 	salt []byte
-	key   []byte
+	key  []byte
 
 	items map[ID]fileStoreItem
 	meta  fileStoreMeta
@@ -74,7 +74,7 @@ type encryptedFileStore struct {
 // fileStoreMeta 是文件级元数据。
 type fileStoreMeta struct {
 	KDFParams Params `json:"params"`
-	Salt      string        `json:"salt"` // base64
+	Salt      string `json:"salt"` // base64
 	// Protected 标记文件是否已设置主密码。
 	//
 	// true 时启动后必须先调 SetPassphrase 才能 Set/Get。
@@ -99,9 +99,9 @@ type fileStoreItem struct {
 
 // fileStoreFile 是磁盘上文件的最外层结构。
 type fileStoreFile struct {
-	Version int                       `json:"version"`
-	KDF     fileStoreMeta             `json:"kdf"`
-	Items   map[string]fileStoreItem  `json:"items"`
+	Version int                      `json:"version"`
+	KDF     fileStoreMeta            `json:"kdf"`
+	Items   map[string]fileStoreItem `json:"items"`
 }
 
 // newEncryptedFileStore 构造一个 encryptedFileStore。

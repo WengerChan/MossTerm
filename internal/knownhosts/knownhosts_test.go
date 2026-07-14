@@ -182,7 +182,7 @@ func TestWildcardMatch(t *testing.T) {
 		{"*", "anything", true},
 		{"*", "example.com", true},
 		// `*` 不跨端口边界（无端口概念，port 由外层独立匹配）
-		{"*.example.com", "example.com", false},  // OpenSSH 规则：不匹配基域
+		{"*.example.com", "example.com", false}, // OpenSSH 规则：不匹配基域
 		{"*.example.com", "foo.example.com", true},
 		{"*.example.com", "a.b.example.com", true},
 		{"*.example.com", "example.org", false},
@@ -453,9 +453,9 @@ func TestLoadFromFile_MalformedLine_Skipped(t *testing.T) {
 	content := strings.Join([]string{
 		"# this is a comment",
 		"",
-		"only-one-field-without-spaces",                                                              // 1 字段（< 3）
-		"host keytype-without-key",                                                                   // 2 字段（< 3）
-		"example.com ssh-ed25519 !!!notbase64!!!",                                                    // base64 解码失败
+		"only-one-field-without-spaces", // 1 字段（< 3）
+		"host keytype-without-key",      // 2 字段（< 3）
+		"example.com ssh-ed25519 !!!notbase64!!!",                                                     // base64 解码失败
 		"example.com ssh-ed25519 " + base64.StdEncoding.EncodeToString([]byte("not a valid ssh key")), // ssh.ParsePublicKey 失败
 		validLine, // 唯一合法
 		"",
@@ -1184,7 +1184,7 @@ func TestHostKeyCallback_ConcurrentTrustRequests_MixedActions(t *testing.T) {
 	wantTrusted := map[int]bool{0: true, 1: false, 2: true, 3: false, 4: true}
 
 	type cbResult struct {
-		idx int
+		idx  int
 		host string
 		err  error
 	}
@@ -1436,7 +1436,7 @@ func TestShortFingerprint(t *testing.T) {
 	}{
 		{"short", "short"},
 		{"", ""},
-		{"0123456789abcdef", "0123456789abcdef"}, // 16 字符不加 "..."
+		{"0123456789abcdef", "0123456789abcdef"},     // 16 字符不加 "..."
 		{"0123456789abcdefg", "0123456789abcdef..."}, // 17 字符 → 截 16 + "..."
 		{"0123456789abcdefghijklmnop", "0123456789abcdef..."},
 	}

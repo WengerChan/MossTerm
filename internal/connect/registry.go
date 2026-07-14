@@ -26,7 +26,7 @@ type Registry interface {
 //
 // 线程安全：所有读写都用 RWMutex 保护。
 type MemoryRegistry struct {
-	mu    sync.RWMutex
+	mu        sync.RWMutex
 	factories map[string]Factory
 }
 

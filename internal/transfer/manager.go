@@ -73,9 +73,9 @@ type Manager struct {
 }
 
 type jobEntry struct {
-	Info    JobInfo
-	cancel  context.CancelFunc
-	doneCh  chan struct{} // 关闭即 job 结束
+	Info   JobInfo
+	cancel context.CancelFunc
+	doneCh chan struct{} // 关闭即 job 结束
 }
 
 // NewManager 构造一个 Manager。

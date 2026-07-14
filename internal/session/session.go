@@ -21,8 +21,9 @@ type ID string
 // State 表示 Session 当前所处的状态。
 //
 // 状态机：
-//   Connecting → Authenticating → Established → Closing → Closed
-//                                              ↘ Failed（任意阶段）
+//
+//	Connecting → Authenticating → Established → Closing → Closed
+//	                                           ↘ Failed（任意阶段）
 type State int32
 
 const (

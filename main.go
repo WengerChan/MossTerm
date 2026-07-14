@@ -4,10 +4,11 @@
 // 处理 SIGINT / SIGTERM 优雅关闭。
 //
 // 使用方式：
-//   mossterm                       # 正常启动
-//   mossterm --debug               # 启用 devtools
-//   mossterm --config=path.toml    # 指定配置文件
-//   mossterm --no-gpu              # 关闭硬件加速
+//
+//	mossterm                       # 正常启动
+//	mossterm --debug               # 启用 devtools
+//	mossterm --config=path.toml    # 指定配置文件
+//	mossterm --no-gpu              # 关闭硬件加速
 package main
 
 import (

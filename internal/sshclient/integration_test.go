@@ -2,12 +2,12 @@
 // 全链路：Dial → OpenSession → sftp.NewClient → 真 SFTP IO。
 //
 // 目的（v0.5.2 spec）：
-//   1. 守住 v0.1 的隐 bug：OpenSession 把 StdinPipe/StdoutPipe 写在 Shell() 之后
-//      （x/crypto v0.22.0 的 Session.StdinPipe 在 started==true 时返回
-//      "StdinPipe after process started" 错误）。v0.5.1 已经修好；本文件
-//      写一个真 SSH server 把它钉死。
-//   2. 验证 Connector.Dial → OpenSession → RawClient → sftp.NewClient
-//      → 真 SFTP Mkdir/Write/Read/ReadDir 端到端联通。
+//  1. 守住 v0.1 的隐 bug：OpenSession 把 StdinPipe/StdoutPipe 写在 Shell() 之后
+//     （x/crypto v0.22.0 的 Session.StdinPipe 在 started==true 时返回
+//     "StdinPipe after process started" 错误）。v0.5.1 已经修好；本文件
+//     写一个真 SSH server 把它钉死。
+//  2. 验证 Connector.Dial → OpenSession → RawClient → sftp.NewClient
+//     → 真 SFTP Mkdir/Write/Read/ReadDir 端到端联通。
 //
 // 测试基础设施：
 //   - sshIntegrationServer：in-process SSH server，绑 127.0.0.1:0，
@@ -68,9 +68,9 @@ import (
 //   - 其他 subsystem → 回复 false
 //
 // 清理：t.Cleanup 触发 s.Close()：
-//   1. cancel(ctx) → 所有 handleConn 收到信号，sconn.Close() → sconn.Wait() 返回
-//   2. listener.Close() → acceptLoop 退出
-//   3. wg.Wait() 等所有 goroutine 退出
+//  1. cancel(ctx) → 所有 handleConn 收到信号，sconn.Close() → sconn.Wait() 返回
+//  2. listener.Close() → acceptLoop 退出
+//  3. wg.Wait() 等所有 goroutine 退出
 type sshIntegrationServer struct {
 	listener  net.Listener
 	serverCfg *ssh.ServerConfig
@@ -131,12 +131,12 @@ func newSSHIntegrationServer(t *testing.T) *sshIntegrationServer {
 	sharedHandlers := sftp.InMemHandler()
 
 	s := &sshIntegrationServer{
-		listener:    l,
-		serverCfg:   serverCfg,
-		ctx:         ctx,
-		cancel:      cancel,
+		listener:     l,
+		serverCfg:    serverCfg,
+		ctx:          ctx,
+		cancel:       cancel,
 		sftpHandlers: sharedHandlers,
-		t:           t,
+		t:            t,
 	}
 	s.wg.Add(1)
 	go s.acceptLoop()
@@ -569,10 +569,10 @@ func TestConnector_OpenSession_FullSFTPPath(t *testing.T) {
 //
 // 做法：与 TestConnector_OpenSession_FullSFTPPath 同样的 in-process SSH server，
 // 但测试 body 更小、更聚焦：
-//   1. Dial
-//   2. OpenSession
-//   3. 明确断言 err == nil 且 err.Error() 不含 "StdinPipe after process started"
-//   4. sess.Read + sess.Write 各一次
+//  1. Dial
+//  2. OpenSession
+//  3. 明确断言 err == nil 且 err.Error() 不含 "StdinPipe after process started"
+//  4. sess.Read + sess.Write 各一次
 //
 // 与主测试互补：主测试覆盖完整业务流，本测试只盯 OpenSession 这一步。
 // 万一未来有人在 OpenSession 里加新逻辑引入了 race / panic，也能被这个
@@ -610,8 +610,8 @@ func TestConnector_OpenSession_StdinPipeOrderRegression(t *testing.T) {
 		// "StdinPipe after process started"（x/crypto v0.22.0 在
 		// started==true 时调 StdinPipe/StdoutPipe 返回的错误）。
 		if strings.Contains(err.Error(), "StdinPipe after process started") {
-			t.Fatalf("OpenSession returned x/crypto 'StdinPipe after process started': %v\n" +
-				"这意味着 StdinPipe/StdoutPipe 在 Shell() 之后被调了。\n" +
+			t.Fatalf("OpenSession returned x/crypto 'StdinPipe after process started': %v\n"+
+				"这意味着 StdinPipe/StdoutPipe 在 Shell() 之后被调了。\n"+
 				"参考 internal/sshclient/client.go OpenSession 顶部注释。", err)
 		}
 		t.Fatalf("OpenSession: %v", err)
@@ -891,10 +891,10 @@ func TestSftpClient_Write_Overwrite_Integration(t *testing.T) {
 // TestSftpClient_UploadFile_Integration 验证 UploadFile 本地文件 → 远端
 // 分片上传。
 //
-// 1. 准备 256 KiB 本地文件 (内容 = 循环字节)
-// 2. UploadFile 走默认 64 KiB chunkSize → 期望进度回调至少 4 次
-//    (256K / 64K = 4)，最后一次 total == 文件大小
-// 3. 远端读回 → 字节级比对
+//  1. 准备 256 KiB 本地文件 (内容 = 循环字节)
+//  2. UploadFile 走默认 64 KiB chunkSize → 期望进度回调至少 4 次
+//     (256K / 64K = 4)，最后一次 total == 文件大小
+//  3. 远端读回 → 字节级比对
 func TestSftpClient_UploadFile_Integration(t *testing.T) {
 	server := newSSHIntegrationServer(t)
 	host, port := server.hostAndPort(t)
@@ -1217,7 +1217,7 @@ func TestSftpClient_List_PageSizeZeroAndLarge(t *testing.T) {
 //
 // 1. Open(... WithPageSize(50))
 // 2. List(pageSize=0) → 应当用 50 作为 pageSize，不是默认 200
-//    - 用 30 个 entries 验证：page 1 = 30 个一次拿完（30 < 50），token=""
+//   - 用 30 个 entries 验证：page 1 = 30 个一次拿完（30 < 50），token=""
 func TestSftpClient_List_WithPageSizeOption(t *testing.T) {
 	server := newSSHIntegrationServer(t)
 	host, port := server.hostAndPort(t)

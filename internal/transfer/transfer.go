@@ -72,10 +72,10 @@ const (
 
 // Options 描述一次传输的可调参数。
 type Options struct {
-	Chunks        int
-	ChunkSize     int64
-	Overwrite     OverwriteMode
-	PreserveMode  bool
+	Chunks       int
+	ChunkSize    int64
+	Overwrite    OverwriteMode
+	PreserveMode bool
 }
 
 // Progress 是订阅者收到的事件。

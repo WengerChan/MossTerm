@@ -50,16 +50,16 @@ type EventEmitter interface {
 type App struct {
 	ctx context.Context
 
-	cfg          *config.Manager
-	secret       secret.Store
-	sessions     session.Manager
-	transfers    transfer.Engine
-	uploadMgr    *transfer.Manager // v0.5.10 streaming upload manager
-	tunnels      tunnel.Manager
-	agents       agent.Registry
-	plugins      plugin.Host
-	ai           ai.Client
-	knownHosts   *knownhosts.Manager
+	cfg        *config.Manager
+	secret     secret.Store
+	sessions   session.Manager
+	transfers  transfer.Engine
+	uploadMgr  *transfer.Manager // v0.5.10 streaming upload manager
+	tunnels    tunnel.Manager
+	agents     agent.Registry
+	plugins    plugin.Host
+	ai         ai.Client
+	knownHosts *knownhosts.Manager
 
 	// connectors 是 connect.Connector 的注册表，被 sessions.Manager 共享。
 	// v0.1 默认注册 "ssh" scheme → sshclient.Factory。

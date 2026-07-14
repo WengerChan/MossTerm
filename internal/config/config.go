@@ -26,14 +26,14 @@ type Manager struct {
 //
 // 所有字段在 toml tag 上都标注了 snake_case 命名。
 type Data struct {
-	Version   int                `toml:"version"`
-	Settings  Settings           `toml:"settings"`
-	Transfer  TransferSettings   `toml:"transfer"`
-	Profiles  map[string]Profile `toml:"profiles"`
-	Layouts   map[string]Layout  `toml:"layouts"`
-	Keymaps   map[string]Keymap  `toml:"keymaps"`
-	Themes    map[string]Theme   `toml:"themes"`
-	Recent    []string           `toml:"recent"`
+	Version  int                `toml:"version"`
+	Settings Settings           `toml:"settings"`
+	Transfer TransferSettings   `toml:"transfer"`
+	Profiles map[string]Profile `toml:"profiles"`
+	Layouts  map[string]Layout  `toml:"layouts"`
+	Keymaps  map[string]Keymap  `toml:"keymaps"`
+	Themes   map[string]Theme   `toml:"themes"`
+	Recent   []string           `toml:"recent"`
 }
 
 // Settings 是全局偏好设置。

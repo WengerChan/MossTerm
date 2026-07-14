@@ -50,10 +50,10 @@ const (
 
 // Stats 描述一个隧道的累计统计。
 type Stats struct {
-	BytesIn    int64
-	BytesOut   int64
+	BytesIn     int64
+	BytesOut    int64
 	ActiveConns int
-	StartedAt  int64
+	StartedAt   int64
 }
 
 // Tunnel 是一个具体的转发实例。

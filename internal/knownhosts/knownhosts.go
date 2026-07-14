@@ -16,22 +16,24 @@
 //   - "找到且匹配" → 放行
 //   - "找到但不匹配"（host key 改变）→ 拒绝（这是 MITM 攻击的信号）
 //   - "未找到"（new host）→
-//     - v0.5.0+：经 EventEmitter 推给前端，用户 trust 后 Add 写入 + 放行；
-//       reject 或 60s 超时则拒绝。
-//     - v0.5.2+：多个并发 SSH 连接同时请求 trust 时，各自独立等待
-//       各自 ID 对应的 reply，per-request channel 隔离。
-//     - 兜底（无 emitter / 单元测试）：自动 Add 写入 + 放行（v0.1.3 行为）
+//   - v0.5.0+：经 EventEmitter 推给前端，用户 trust 后 Add 写入 + 放行；
+//     reject 或 60s 超时则拒绝。
+//   - v0.5.2+：多个并发 SSH 连接同时请求 trust 时，各自独立等待
+//     各自 ID 对应的 reply，per-request channel 隔离。
+//   - 兜底（无 emitter / 单元测试）：自动 Add 写入 + 放行（v0.1.3 行为）
 //
 // 与 sshclient 的关系：
-//   connect.Deps 加 KnownHosts *Manager 字段
-//   sshclient.New 存到 Connector
-//   sshclient.Dial 把它转成 ssh.HostKeyCallback 给 ssh.ClientConfig 用
+//
+//	connect.Deps 加 KnownHosts *Manager 字段
+//	sshclient.New 存到 Connector
+//	sshclient.Dial 把它转成 ssh.HostKeyCallback 给 ssh.ClientConfig 用
 //
 // 为什么不用 x/crypto/ssh/knownhosts 标准库：
-//   那个包只导出 New(files) (HostKeyCallback, error)，不导出 DB 类型，
-//   无法在 callback 命中"未找到"分支时手动 Add。我们的需求是
-//   "首次连接询问用户 + 持久化"，所以需要自实现匹配算法。
-//   匹配规则源自 OpenSSH addrmatch.c（与标准库 wildcardMatch 等价实现）。
+//
+//	那个包只导出 New(files) (HostKeyCallback, error)，不导出 DB 类型，
+//	无法在 callback 命中"未找到"分支时手动 Add。我们的需求是
+//	"首次连接询问用户 + 持久化"，所以需要自实现匹配算法。
+//	匹配规则源自 OpenSSH addrmatch.c（与标准库 wildcardMatch 等价实现）。
 package knownhosts
 
 import (
@@ -273,8 +275,8 @@ func (m *Manager) Size() int {
 //  2. host pattern 匹配但 key 不匹配 → 拒绝（返回 ErrHostKeyMismatch；MITM 信号）
 //  3. host 全无匹配 → 走"首次信任"路径：
 //     a) emitter 非 nil → EmitTrustRequest 给前端；等用户响应
-//        - "trust" → Add 写入 + 放行
-//        - "reject" 或超时 → 拒绝
+//     - "trust" → Add 写入 + 放行
+//     - "reject" 或超时 → 拒绝
 //     b) emitter 为 nil → 自动 Add 写入文件 + 放行（v0.1.3 兜底）
 //
 // 签名遵循 x/crypto v0.22+：返回 error 而非 bool（nil = 放行）。
@@ -464,8 +466,8 @@ func (m *Manager) Close() error {
 //
 // 行为（v0.5.2 per-request channel 模式）：
 //   - 在 trustWaiters map 中找到 requestID 对应的 replyCh：
-//     - 5s 内能写入（replyCh 容量 1，正常立即成功）→ 返回 nil。
-//     - 5s 内写不进去（极端：handler 死锁 / channel 满了但 receiver 没消费）→ 返回 error。
+//   - 5s 内能写入（replyCh 容量 1，正常立即成功）→ 返回 nil。
+//   - 5s 内写不进去（极端：handler 死锁 / channel 满了但 receiver 没消费）→ 返回 error。
 //   - 找不到 requestID（已 timeout / 已 reject / ID 错误）→ 立即返回 error。
 //
 // 锁：拿 trustMu 做 map 查找（短临界区）。写入 replyCh 时**不持** trustMu，

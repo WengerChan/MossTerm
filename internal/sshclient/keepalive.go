@@ -11,21 +11,23 @@
 //     已死的话，TCP keepalive 探不出来 —— 必须走 SSH 协议层
 //
 // 退出路径（任意一个）：
-//   1. 正常：Connector.Close() → close(c.done) → select 命中 done 分支 return
-//   2. 异常：下次 SendRequest 因 conn 已关而失败 → 记录 warn + return
+//  1. 正常：Connector.Close() → close(c.done) → select 命中 done 分支 return
+//  2. 异常：下次 SendRequest 因 conn 已关而失败 → 记录 warn + return
 //
 // v0.1.4 范围（重要）：
-//   协程不主动关闭 *ssh.Client —— "关 client" 会同时挂掉所有走该 client
-//   的 session / channel，影响面超出 keepalive 自身职责。session 关闭走
-//   正常的 sess.Close() → conn.Close() 链路；下次 SendRequest 失败时本
-//   协程自然通过路径 2 退出。
+//
+//	协程不主动关闭 *ssh.Client —— "关 client" 会同时挂掉所有走该 client
+//	的 session / channel，影响面超出 keepalive 自身职责。session 关闭走
+//	正常的 sess.Close() → conn.Close() 链路；下次 SendRequest 失败时本
+//	协程自然通过路径 2 退出。
 //
 // v0.22.0 API 兼容性：
-//   x/crypto v0.22.0 的 *ssh.Client 没有自己的 SendRequest 方法，通过嵌入
-//   的 Conn interface 暴露：
-//     SendRequest(name string, wantReply bool, payload []byte) (bool, []byte, error)
-//   没有 context 入参（context 形式是 v0.33+ 引入的）。
-//   因此本文件的超时通过 goroutine + select 模式实现，不是 ctx.WithTimeout。
+//
+//	x/crypto v0.22.0 的 *ssh.Client 没有自己的 SendRequest 方法，通过嵌入
+//	的 Conn interface 暴露：
+//	  SendRequest(name string, wantReply bool, payload []byte) (bool, []byte, error)
+//	没有 context 入参（context 形式是 v0.33+ 引入的）。
+//	因此本文件的超时通过 goroutine + select 模式实现，不是 ctx.WithTimeout。
 package sshclient
 
 import (

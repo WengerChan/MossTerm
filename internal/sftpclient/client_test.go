@@ -233,8 +233,8 @@ func TestClientNil_AllMethods_DoNotPanic(t *testing.T) {
 }
 
 // TestClose_IdempotentAndNilSafe 验证 Close 的两个性质：
-//   1. 关闭过的 Client（c.sc == nil）再调 Close 返回 nil，不 panic
-//   2. 并发调用 Close 安全（不会 double-close underlying *sftp.Client）
+//  1. 关闭过的 Client（c.sc == nil）再调 Close 返回 nil，不 panic
+//  2. 并发调用 Close 安全（不会 double-close underlying *sftp.Client）
 //
 // 第二点实际上 v0.5.0 没法直接验证（没有 mock *sftp.Client），
 // 只能验证"不 panic"。这与 keepalive_test.go 里 TestConnectorClose_ConcurrentSafe
@@ -273,8 +273,8 @@ func TestClose_IdempotentAndNilSafe(t *testing.T) {
 func TestWithPageSize_NoOp(t *testing.T) {
 	c := &Client{}
 	WithPageSize(500)(c)
-	WithPageSize(0)(c)   // 0 也不该 panic
-	WithPageSize(-1)(c)  // 负数也不该 panic
+	WithPageSize(0)(c)  // 0 也不该 panic
+	WithPageSize(-1)(c) // 负数也不该 panic
 	// 跑完没 panic 即通过
 }
 

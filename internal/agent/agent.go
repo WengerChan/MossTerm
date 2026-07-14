@@ -4,7 +4,7 @@
 //   - Client  ——  对本地 ssh-agent（$SSH_AUTH_SOCK）的封装，提供 Signer 列表
 //   - Registry ——  跳板策略的注册表（direct / single-jump / ...）
 //   - 具体策略 BuildFunc ——  由调用方实现并注册；agent 包不依赖
-//                          internal/sshclient，避免循环 import
+//     internal/sshclient，避免循环 import
 //
 // 与 internal/connect 的关系：
 //   - connect.Registry 管理"协议"（ssh / telnet / serial）
@@ -143,7 +143,7 @@ type Registry interface {
 
 // MemoryRegistry 是 Registry 的进程内实现。
 type MemoryRegistry struct {
-	mu        sync.RWMutex
+	mu         sync.RWMutex
 	strategies map[string]BuildFunc
 }
 

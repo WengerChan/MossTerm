@@ -1,10 +1,10 @@
 // sftp_test.go 覆盖 internal/app 的 SFTP 客户端生命周期。
 //
 // 范围（v0.5.1-A spec）：
-//   1. 生命周期：Open session → sftpFor 建 client → 再 sftpFor 复用 → 关 → sftpFor 重建
-//   2. 并发安全：10 个 goroutine 同时 sftpFor（race detector 验证）
-//   3. 错误路径：session 不存在 / 未 established / 已 closed
-//   4. App.Close 清理：所有缓存的 sftp client 被 Close
+//  1. 生命周期：Open session → sftpFor 建 client → 再 sftpFor 复用 → 关 → sftpFor 重建
+//  2. 并发安全：10 个 goroutine 同时 sftpFor（race detector 验证）
+//  3. 错误路径：session 不存在 / 未 established / 已 closed
+//  4. App.Close 清理：所有缓存的 sftp client 被 Close
 //
 // 测试基础设施：
 //   - sshTestServer：in-process SSH server（accept any password / ed25519 host key）
@@ -304,7 +304,8 @@ func openEstablishedSession(t *testing.T, mm *session.MemoryManager, sshServer *
 // -----------------------------------------------------------------------------
 
 // TestSftpFor_Lifecycle 覆盖完整生命周期：
-//   Open → sftpFor 建 → 复用 → 关闭 session → 重建
+//
+//	Open → sftpFor 建 → 复用 → 关闭 session → 重建
 func TestSftpFor_Lifecycle(t *testing.T) {
 	server := newSSHTestServer(t)
 	mm := session.NewMemoryManager()
@@ -375,10 +376,10 @@ func TestSftpFor_Lifecycle(t *testing.T) {
 // race detector 必须无报警。
 //
 // 验证：
-//   1. 所有 goroutine 拿到的 client 是**同一个实例**（指针相等）
-//   2. map 中只**一个** entry（其他 wasted open 的 client 被 closeSftpClients 逻辑里
-//      的"二次检查"丢掉了 —— 见 sftpFor 内部"写回 map"段的 if existing check）
-//   3. race detector 无报警
+//  1. 所有 goroutine 拿到的 client 是**同一个实例**（指针相等）
+//  2. map 中只**一个** entry（其他 wasted open 的 client 被 closeSftpClients 逻辑里
+//     的"二次检查"丢掉了 —— 见 sftpFor 内部"写回 map"段的 if existing check）
+//  3. race detector 无报警
 //
 // 注意：sftp open 调用次数**可能**>1（两个 goroutine 同时 miss 后都调了 openSftp），
 // 但只有一个 client 进 map。 wasted open 的 client 被 sftpFor 内

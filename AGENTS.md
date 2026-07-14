@@ -18,26 +18,25 @@
 
 ## 📊 当前进度
 
-- **最新 tag**: v0.5.7（CI 真正绿 + 项目根 main.go）
-- **最新 commit**: `b1d3076`
+- **最新 tag**: v0.5.11（x/crypto 升 v0.31.0）
+- **最新 commit**: `67d85c5`
 - **分支**: main
-- **可执行二进制**: `/tmp/mossterm-v053-final` (7.64 MB ARM64)
-- **测试**: 128/129 通过 + 1 SKIP（race detector 干净，+34 PASS vs v0.5.2）
-- **真实 build 需要**: `cp -R` 到 `/tmp/MossTerm_test` 后跑 `go build`（Documents 目录沙盒限制）
+- **可执行二进制**: `/tmp/mossterm-bin` (v0.5.10 验证 build)
+- **测试**: 8 packages ok / race clean / tsc 0 / eslint 0 / transfer 100MB 集成 32s
+- **真实 build 需要**: `cp -R` 到 `/tmp/MossTerm_v5xx` 再 build（Documents 目录沙盒限制）
 - **CI/CD**: `.github/workflows/{ci,release}.yml` 已修订 — push/PR 跑 CI，tag `v*` 自动发版
 
 ## 🛣️ 下一步候选
 
-| 版本 | 内容 | 难度 |
-|---|---|---|
-| v0.5.5 | profile 编辑 UI（manager 早好了只差前端） | 中 |
-| v0.5.5 | SFTP binary preview（图片 / PDF 缩略） | 中 |
-| v0.5.5 | SFTP 集成到 Pane 树（双 pane: 左 SSH / 右 SFTP） | 中 |
-| v0.6.0 | macOS code signing + 公证 | 中 |
-| v0.6.0 | 跳板链 (multi-hop) | 大 |
-| v0.6.0 | 端口转发 (local/remote forward) | 大 |
-| v0.6.0 | SFTP streaming upload（>100MB 分片上传） | 中 |
-| v0.6.0 | x/crypto 升级到 v0.31+（社区版已稳定 argon2） | 小 |
+| 版本 | 内容 | 难度 | 备注 |
+|---|---|---|---|
+| v0.6.0 | 跳板链 (multi-hop) | 大 | `internal/agent/` 骨架就位，差实质逻辑 |
+| v0.6.1 | 端口转发 (local/remote forward) | 大 | `internal/tunnel/` 骨架就位，差实质逻辑 |
+| v0.6.2 | SFTP download 流式 | 中 | 复用 `internal/transfer/streaming.go` 架构（v0.5.10） |
+| v0.6.3 | macOS code signing + 公证 | 中 | 分发前置 |
+| v0.6.4 | 真实 PDF 渲染 | 中 | v0.5.9 留 best-effort，接 pdf.js 或自实现 spec |
+| v0.6.5 | Pane 树持久化 | 中 | v0.5.8 留 v0.6+，等 config 持久化先到位 |
+| v0.6.6 | x/crypto 升 v0.40+ | 大 | 解 v0.33+ 限制，secret 包需适配（argon2 签名 + ssh.NewClient 拆两步） |
 
 ## ⚠️ 不要踩的坑
 
@@ -46,7 +45,7 @@
 - **`go build` ≠ `wails build`**：裸 `go build` 只验 Go 编译，**不会**打 webview 资源；
   完整桌面包必须用 `wails build`。`cmd/mossterm/frontend/dist/index.html` 是
   占位文件（让 `go build` 能过），`wails build` 会覆盖它
-- **x/crypto 锁 v0.22.0**（v0.33+ 移除了 argon2 类型、ssh.NewClient 拆两步等）
+- **x/crypto 锁 v0.31.0**（v0.33+ 移除了 argon2 类型、ssh.NewClient 拆两步等；v0.31 是最后一个保留旧 API 的稳定版）
 - **wails 锁 2.12.0**（2.9.2 依赖的 leaanthony/u v1.4.0 国内镜像没缓存）
 - **ssh.HostKeyCallback v0.22+ 返回 error 不是 bool**（v0.1.1 写错过）
 - **Go 1.26 严格类型**：named func type 不能隐式转换，用 `type X = Y` alias
@@ -62,15 +61,20 @@
 
 ## 📁 关键目录
 
-- `cmd/mossterm/main.go` — 启动入口
+- `main.go` — 启动入口（v0.5.7 从 `cmd/mossterm/` 移到项目根）
 - `internal/sshclient/` — SSH 协议实现
 - `internal/knownhosts/` — host key 校验（自实现，OpenSSH 兼容）
 - `internal/session/` — 业务层会话（异步化 + events 批处理 + state machine）
 - `internal/connect/` — 协议无关连接抽象
 - `internal/secret/` — 凭据存储（keyring + 加密文件）
+- `internal/sftpclient/` — SFTP 客户端（含 preview magic 分类，v0.5.9）
+- `internal/transfer/` — 传输抽象（streaming upload + manifest + 断点续传，v0.5.10）
+- `internal/agent/` — 跳板链（v0.6.0 待实质化）
+- `internal/tunnel/` — 端口转发（v0.6.1 待实质化）
 - `internal/ui/wailsbindings/` — 前端 API
-- `frontend/` — React + xterm.js
-- `docs/ARCHITECTURE.md` — 架构设计（1364 行）
+- `frontend/src/components/tabs/paneTree.ts` — Pane 树算法（v0.5.8 抽离）
+- `frontend/src/components/sftp/` — SFTP 浏览器 + PreviewPanel + UploadProgress
+- `docs/ARCHITECTURE.md` — 架构设计
 - `docs/dev-log/` — 按版本号的开发日志
 - `docs/agent-logs/` — 按 task 派发顺序的交付记录
 

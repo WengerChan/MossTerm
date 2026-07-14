@@ -218,8 +218,11 @@ func (c *Connector) Dial(ctx context.Context, params connect.DialParams) (net.Co
 // v0.5.2 起由 internal/sshclient/integration_test.go 守住：
 //   - TestConnector_OpenSession_FullSFTPPath（主测试，完整端到端）
 //   - TestConnector_OpenSession_StdinPipeOrderRegression（聚焦测试）
+//
 // 改这条路径前先跑：
-//   go test -count=1 -race ./internal/sshclient/...
+//
+//	go test -count=1 -race ./internal/sshclient/...
+//
 // 看到 3 个 PASS（keepalive 2 个 + integration 2 个；RawClientLifecycle + 2
 // 集成 = 3 个新增）才算过。
 func (c *Connector) OpenSession(ctx context.Context, conn net.Conn, opts connect.SessionOpts) (connect.Session, error) {

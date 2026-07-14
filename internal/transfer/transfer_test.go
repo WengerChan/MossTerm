@@ -97,11 +97,11 @@ func TestNormalizeChunkSize(t *testing.T) {
 	}{
 		{0, DefaultChunkSize},
 		{-1, DefaultChunkSize},
-		{100, MinChunkSize},                       // clamp up
-		{1 * 1024 * 1024, 1 * 1024 * 1024},        // exact min
-		{4 * 1024 * 1024, 4 * 1024 * 1024},        // exact default
-		{16 * 1024 * 1024, 16 * 1024 * 1024},      // exact max
-		{100 * 1024 * 1024, MaxChunkSize},         // clamp down
+		{100, MinChunkSize},                  // clamp up
+		{1 * 1024 * 1024, 1 * 1024 * 1024},   // exact min
+		{4 * 1024 * 1024, 4 * 1024 * 1024},   // exact default
+		{16 * 1024 * 1024, 16 * 1024 * 1024}, // exact max
+		{100 * 1024 * 1024, MaxChunkSize},    // clamp down
 	}
 	for _, c := range cases {
 		if got := normalizeChunkSize(c.in); got != c.want {
@@ -282,8 +282,8 @@ type fakeUploader struct {
 	mu      sync.Mutex
 	storage map[string]*fakeFile
 	// truncateErr / openErr 可注入错误
-	openErr      error
-	truncateErr  error
+	openErr     error
+	truncateErr error
 }
 
 type fakeFile struct {
@@ -502,13 +502,13 @@ func TestUpload_ResumeMismatch(t *testing.T) {
 	upl := newFakeUploader()
 	// 写一个 manifest，记录 localPath=另一个文件
 	mismatch := &Manifest{
-		TransferID:   "tx-mismatch",
-		LocalPath:    "/different/path",
-		RemotePath:   "/remote/x",
-		ChunkSize:    4 * 1024 * 1024,
-		TotalSize:    1024,
+		TransferID:     "tx-mismatch",
+		LocalPath:      "/different/path",
+		RemotePath:     "/remote/x",
+		ChunkSize:      4 * 1024 * 1024,
+		TotalSize:      1024,
 		UploadedChunks: []int{0},
-		LocalModTime: time.Now(),
+		LocalModTime:   time.Now(),
 	}
 	if err := SaveManifest(dir, mismatch); err != nil {
 		t.Fatalf("SaveManifest: %v", err)

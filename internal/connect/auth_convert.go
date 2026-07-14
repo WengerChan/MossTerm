@@ -39,9 +39,9 @@ const (
 //   - passphrase: 私钥 passphrase（仅 publickey 时使用，可选）
 //
 // v0.1.2 起 publickey 真实接通：
-//   1. publickey 路径返回 PublicKeyAuth{KeyID, Passphrase}，Signer 留空
-//   2. sshclient 收到这个 AuthMethod 后用 connector.secrets 拉私钥 bytes
-//   3. 解析为 ssh.Signer 后用于 ssh.PublicKeys
+//  1. publickey 路径返回 PublicKeyAuth{KeyID, Passphrase}，Signer 留空
+//  2. sshclient 收到这个 AuthMethod 后用 connector.secrets 拉私钥 bytes
+//  3. 解析为 ssh.Signer 后用于 ssh.PublicKeys
 //
 // 该分工让 connect 包保持"协议无关 + 不依赖具体实现"，secret 拉取和
 // PEM 解析在 sshclient 内部完成。

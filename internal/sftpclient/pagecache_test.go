@@ -93,11 +93,11 @@ func TestEncodeTokenDecodeToken_PathWithColon(t *testing.T) {
 // TestDecodeToken_InvalidBase64 验证 base64 解码失败统一返回 ErrInvalidPageToken。
 func TestDecodeToken_InvalidBase64(t *testing.T) {
 	cases := []string{
-		"",                       // 空
-		"!!!",                    // 完全非法字符
-		"not_base64_!@#$%^&*()",  // 杂字符
-		"a",                      // 单字符（RawURLEncoding 要求 padding-free multiple of 4 after re-pad；但单字符确实不是 valid base64）
-		"====",                   // 只有 padding
+		"",                      // 空
+		"!!!",                   // 完全非法字符
+		"not_base64_!@#$%^&*()", // 杂字符
+		"a",                     // 单字符（RawURLEncoding 要求 padding-free multiple of 4 after re-pad；但单字符确实不是 valid base64）
+		"====",                  // 只有 padding
 	}
 	for _, c := range cases {
 		t.Run(c, func(t *testing.T) {
@@ -534,7 +534,7 @@ func TestPageCache_ConcurrentSafe(t *testing.T) {
 		go func(gid int) {
 			defer wg.Done()
 			for i := 0; i < ops; i++ {
-				p := pathFromInt((gid * ops + i) % 50) // 50 个 path 轮转
+				p := pathFromInt((gid*ops + i) % 50) // 50 个 path 轮转
 				if i%3 == 0 {
 					pc.put(p, pageState{entries: makeEntries(i)})
 				} else if i%3 == 1 {

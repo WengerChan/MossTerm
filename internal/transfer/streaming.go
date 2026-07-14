@@ -21,7 +21,7 @@
 // 与 transfer.go Engine 接口的关系：
 //   - Engine 接口（v0.1 占位）描述通用多任务队列；v0.5.10 不实现
 //   - Manager（manager.go）描述 v0.5.10 streaming upload 的 jobs map
-//     + 取消 + 事件推送，是 wailsbinding 实际用的对象
+//   - 取消 + 事件推送，是 wailsbinding 实际用的对象
 package transfer
 
 import (
@@ -198,7 +198,7 @@ var (
 // End = Start + Size；最后一片的 End 可能 < TotalSize（如果 totalSize
 // 不是 chunkSize 的整数倍）。
 type ChunkRange struct {
-	Index int   // 0-based
+	Index int // 0-based
 	Start int64
 	End   int64 // 写到的字节 offset（exclusive）
 }
@@ -294,10 +294,10 @@ type chunkDone struct {
 
 // uploadState 持有 Upload 期间的运行时状态（atomic 字段供并发 worker 读写）。
 type uploadState struct {
-	bytesSent  atomic.Int64
-	startTime  time.Time
-	lastEmit   time.Time
-	lastBytes  int64
+	bytesSent atomic.Int64
+	startTime time.Time
+	lastEmit  time.Time
+	lastBytes int64
 	// manifestCh 是 worker 完成一片时往里写 *chunkDone 的通道；
 	// 主 goroutine 串行累加 manifest.UploadedChunks + 写盘，保证单写者。
 	manifestCh chan *chunkDone
@@ -328,7 +328,7 @@ func newUploadState() *uploadState {
 //  8. 启动 N 个 worker goroutine，按 chunk 索引分配任务
 //  9. 主 goroutine：收集 manifest 更新（每片 flush）+ 限速 emit Progress
 //  10. ctx 取消：worker 检查 ctx 立即退出；主 goroutine 收到错误后
-//      保留 manifest（已传 chunk 记下来）返回 ErrUploadFailed
+//     保留 manifest（已传 chunk 记下来）返回 ErrUploadFailed
 //
 // progress 回调可能在任意 goroutine 调用；调用方负责线程安全。
 // progress 为 nil 时不回调（测试 / 后台跑用）。

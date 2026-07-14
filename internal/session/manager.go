@@ -143,7 +143,7 @@ func (m *MemoryManager) WithKnownHosts(kh *knownhosts.Manager) *MemoryManager {
 //  8. 返回 session
 //
 // 异步阶段（dialInBackground goroutine 内）：
-//  9.  connector.Dial → 失败：state=Failed + signalDone
+//  9. connector.Dial → 失败：state=Failed + signalDone
 //  10. state=Authenticating + tryPublish
 //  11. connector.OpenSession → 失败：conn.Close + state=Failed + signalDone
 //  12. SetDialedSess(conn, sshSess) + state=Established + tryPublish
@@ -254,14 +254,15 @@ func (m *MemoryManager) Open(ctx context.Context, req OpenRequest) (Session, err
 // 之前已注册的 subscriber 仍可通过 Info().State 看到 Failed（state 事件已 publish）。
 //
 // 关闭语义 + race 处理：
-//   每一步状态转换用 setStateAndPublishIf（CAS + publish 在 publishMu 内）做
-//   "check-and-set"——如果 Close 已经抢先把 state 推到 Closing/Closed，CAS
-//   失败，本 goroutine 释放已分配资源（conn.Close / sshSess.Close）后退出，
-//   不覆盖 Close 写入的 Closed。
 //
-//   这避免了 v0.1.x 那种"A: isClosedOrClosing()=false / B: Close 把 state→Closed
-//   / A: setState(Authenticating) 覆盖 Closed"的 race（subscriber 会看到
-//   Connecting → Closed → Authenticating 的荒谬时序）。
+//	每一步状态转换用 setStateAndPublishIf（CAS + publish 在 publishMu 内）做
+//	"check-and-set"——如果 Close 已经抢先把 state 推到 Closing/Closed，CAS
+//	失败，本 goroutine 释放已分配资源（conn.Close / sshSess.Close）后退出，
+//	不覆盖 Close 写入的 Closed。
+//
+//	这避免了 v0.1.x 那种"A: isClosedOrClosing()=false / B: Close 把 state→Closed
+//	/ A: setState(Authenticating) 覆盖 Closed"的 race（subscriber 会看到
+//	Connecting → Closed → Authenticating 的荒谬时序）。
 //
 // v0.2.4 行为变更：setStateAndPublishIf 把 CAS + tryPublish 合并到
 // publishMu 内执行，Close 不会在 CAS 成功与 publish 之间抢先——彻底消除

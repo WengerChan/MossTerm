@@ -17,9 +17,9 @@ import (
 type Provider string
 
 const (
-	OpenAI     Provider = "openai"
-	Ollama     Provider = "ollama"
-	Anthropic  Provider = "anthropic"
+	OpenAI    Provider = "openai"
+	Ollama    Provider = "ollama"
+	Anthropic Provider = "anthropic"
 )
 
 // Client 是 AI 能力的抽象接口。

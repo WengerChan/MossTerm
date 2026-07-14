@@ -1,19 +1,19 @@
 // session_impl_test.go 覆盖 v0.2 引入的两个新行为：
-//   1. tryPublish 在 events 通道满时累加 overflowBytes + 置位 overflowPending
-//   2. fanoutLoop 在 broadcast 后通过 maybeEmitOverflow 发出 overflow 事件
+//  1. tryPublish 在 events 通道满时累加 overflowBytes + 置位 overflowPending
+//  2. fanoutLoop 在 broadcast 后通过 maybeEmitOverflow 发出 overflow 事件
 //
 // v0.2.3 扩展：sub drop 累加（mirror overflow 机制）
-//   1. broadcast 在 sub channel 满时累加 subDropBytes + 置位 subDropPending
-//   2. fanoutLoop 在 broadcast 后通过 maybeEmitSubOverflow 发出 sub:overflow 事件
-//   3. 防递归不变量：sub:overflow / overflow / state / exit / error 事件被 drop
-//      时**不**累加（Data 字段为空），sub:overflow 自身 drop 也不递归
+//  1. broadcast 在 sub channel 满时累加 subDropBytes + 置位 subDropPending
+//  2. fanoutLoop 在 broadcast 后通过 maybeEmitSubOverflow 发出 sub:overflow 事件
+//  3. 防递归不变量：sub:overflow / overflow / state / exit / error 事件被 drop
+//     时**不**累加（Data 字段为空），sub:overflow 自身 drop 也不递归
 //
 // v0.2.4 扩展：publishMu 序列化"setState + tryPublish" + Close，消除 stale event race
-//   1. setStateAndPublishIf CAS + publish 在 publishMu 内执行
-//   2. setStateAndPublish 无条件 set + publish 在 publishMu 内执行
-//   3. 关键不变量：subscriber 看到的 state 事件序列单调——
-//      一旦收到 Closing/Closed，不会再出现 Connecting/Authenticating/Established
-//   4. 多次并发 Close 安全（closeOnce 保证 Closing 事件只发一次）
+//  1. setStateAndPublishIf CAS + publish 在 publishMu 内执行
+//  2. setStateAndPublish 无条件 set + publish 在 publishMu 内执行
+//  3. 关键不变量：subscriber 看到的 state 事件序列单调——
+//     一旦收到 Closing/Closed，不会再出现 Connecting/Authenticating/Established
+//  4. 多次并发 Close 安全（closeOnce 保证 Closing 事件只发一次）
 //
 // 不覆盖：
 //   - readLoop 批处理行为：要起真实 SSH server + 喂可控速率的字节流，
@@ -197,10 +197,10 @@ func TestMaybeEmitOverflow_NotPending_NoBroadcast(t *testing.T) {
 // 不变量：events cap 极小（1），所有 publish 都进 overflow。
 func TestMaybeEmitOverflow_ConcurrentSafe(t *testing.T) {
 	const (
-		eventsCap       = 1
-		pubGoroutines   = 4
+		eventsCap        = 1
+		pubGoroutines    = 4
 		pubsPerGoroutine = 100
-		payloadSize     = 7
+		payloadSize      = 7
 	)
 
 	s := newTestSession(eventsCap)
@@ -780,7 +780,7 @@ func TestStatePublishOrdering_MultipleCloses(t *testing.T) {
 //
 // 不启 fanoutLoop、不订阅 subscriber——直接检查 s.events 通道，避免
 // 引入"sub channel 在事件被 broadcast 之前就被 Close 关掉"的预存 bug
-//（v0.2.x 已有，非 v0.2.4 修复范围）。
+// （v0.2.x 已有，非 v0.2.4 修复范围）。
 func TestSetStateAndPublish_EventInChannelSynchronously(t *testing.T) {
 	s := newTestSession(16)
 	s.state.Store(int32(StateAuthenticating))

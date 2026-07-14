@@ -2,15 +2,15 @@
 // 错误路径。
 //
 // 测试策略（v0.5.3-B spec）：
-//   1. **Happy path 端到端**：用 in-process SSH server（带 SFTP subsystem +
-//      sftp.InMemHandler 共享 FS）建真实 session，构造 *wailsbindings.App，
-//      调 SftpUploadFile 写字节，再用 sftp.NewClient 直接读回验证内容一致。
-//   2. **错误路径 session 不存在**：构造一个空 *app.App，验证
-//      SftpUploadFile 把 "session not found" 包装成
-//      "wailsbindings.SftpUploadFile: ..." 形式。
-//   3. **边界**：空内容（零字节）不报错。
-//   4. **覆盖写**：第二次写覆盖第一次（不拼接）。
-//   5. **编译期守卫**：SftpUploadFile 签名稳定。
+//  1. **Happy path 端到端**：用 in-process SSH server（带 SFTP subsystem +
+//     sftp.InMemHandler 共享 FS）建真实 session，构造 *wailsbindings.App，
+//     调 SftpUploadFile 写字节，再用 sftp.NewClient 直接读回验证内容一致。
+//  2. **错误路径 session 不存在**：构造一个空 *app.App，验证
+//     SftpUploadFile 把 "session not found" 包装成
+//     "wailsbindings.SftpUploadFile: ..." 形式。
+//  3. **边界**：空内容（零字节）不报错。
+//  4. **覆盖写**：第二次写覆盖第一次（不拼接）。
+//  5. **编译期守卫**：SftpUploadFile 签名稳定。
 //
 // 与现有测试的分工：
 //   - sftpclient 端到端（sshclient/integration_test.go::TestSftpClient_Write_Integration）
