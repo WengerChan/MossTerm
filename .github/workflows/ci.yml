@@ -287,7 +287,6 @@ jobs:
           else
             powershell -NoProfile -Command "Compress-Archive -Path '$PAYLOAD' -DestinationPath 'mossterm-${{ matrix.platform }}.zip'"
           fi
-        shell: bash
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
