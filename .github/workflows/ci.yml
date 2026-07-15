@@ -30,7 +30,7 @@ permissions:
 
 env:
   # 最低 1.23+ —— wails 2.12 + x/crypto v0.22 推荐；本地是 1.26.x
-  GO_VERSION: "1.23"
+  GO_VERSION: "1.25"
   NODE_VERSION: "24"
   WAILS_VERSION: "v2.12.0"
   # 本仓库 module 路径

@@ -18,13 +18,14 @@
 
 ## 📊 当前进度
 
-- **最新 tag**: v0.5.11（x/crypto 升 v0.31.0）
-- **最新 commit**: `67d85c5`
+- **最新 tag**: v0.5.12（CI 修复：gofmt + golangci v1.64 schema + govulncheck 漏洞）
+- **最新 commit**: `07e4ac3`
 - **分支**: main
 - **可执行二进制**: `/tmp/mossterm-bin` (v0.5.10 验证 build)
 - **测试**: 8 packages ok / race clean / tsc 0 / eslint 0 / transfer 100MB 集成 32s
 - **真实 build 需要**: `cp -R` 到 `/tmp/MossTerm_v5xx` 再 build（Documents 目录沙盒限制）
 - **CI/CD**: `.github/workflows/{ci,release}.yml` 已修订 — push/PR 跑 CI，tag `v*` 自动发版
+- **GitHub 排查 token**: 存于 `~/.mavis/secrets/github.env`（`GITHUB_TOKEN`）
 
 ## 🛣️ 下一步候选
 
