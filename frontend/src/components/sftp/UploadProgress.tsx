@@ -1,15 +1,20 @@
 /**
- * UploadProgress（v0.5.10 streaming upload 进度面板）
+ * UploadProgress（v0.5.10 streaming upload + v0.6.0 streaming download 进度面板）
  * --------------------------------------------------------------------
- * 显示当前 active streaming upload 任务的进度条 + 速度 + ETA + 取消按钮。
+ * 显示当前 active streaming upload / download 任务的进度条 + 速度 + ETA + 取消按钮。
  * 多个任务时按 startedAt 倒序展示（最新在上），每条一个 row。
  *
+ * v0.6.0 扩展：JobView.direction 字段决定 UI 表现：
+ *   - "upload"   → Upload 图标 + 文件名取 localPath（拖上去的本地文件）
+ *   - "download" → Download 图标 + 文件名取 remotePath（远端拖下来的）
+ * 共享进度条逻辑（emit 节流、cancel、done/error 处理都同源）。
+ *
  * 数据来源：transferStore（被 useTransferEvents 钩子写）。
- * 取消操作：调 useTransferStore.cancelUpload → App.CancelUpload → 后端 ctx cancel。
+ * 取消操作：调 useTransferStore.cancelUpload / cancelDownload → 后端 ctx cancel。
  *
  * 与 PreviewPanel 的关系：
  *   - PreviewPanel 是文件"打开"路径的覆盖层
- *   - UploadProgress 是文件"上传"路径的进度条
+ *   - UploadProgress 是文件"上传 / 下载"路径的进度条
  *   - 两者不冲突：drag 上传时 UploadProgress 出现在 SftpBrowserContent
  *     底部；PreviewPanel 仅在用户双击文件时出现
  *
@@ -19,7 +24,7 @@
  *   - 颜色：进度条 accent（绿）；完成用 state-success；失败用 state-err
  */
 import { useMemo } from "react";
-import { Upload, X, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
+import { Upload, Download, X, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import clsx from "clsx";
 import { useTransferStore, type JobView } from "@stores/transferStore";
 import { formatBytes } from "@utils/format";
@@ -62,6 +67,7 @@ function etaText(sec: number): string {
 export function UploadProgress({ sessionID, className }: UploadProgressProps) {
   const jobs = useTransferStore((s) => s.listJobs());
   const cancelUpload = useTransferStore((s) => s.cancelUpload);
+  const cancelDownload = useTransferStore((s) => s.cancelDownload);
   const clearFinished = useTransferStore((s) => s.clearFinished);
 
   // 可选：按 sessionID 过滤
@@ -77,6 +83,8 @@ export function UploadProgress({ sessionID, className }: UploadProgressProps) {
   const active = filtered.filter((j) => j.state === "running");
   const finished = filtered.filter((j) => j.state !== "running");
   const hasFinished = finished.length > 0;
+  const activeUploads = active.filter((j) => (j.direction ?? "upload") === "upload").length;
+  const activeDownloads = active.length - activeUploads;
 
   return (
     <div
@@ -89,10 +97,12 @@ export function UploadProgress({ sessionID, className }: UploadProgressProps) {
     >
       {/* 顶部 header：active 计数 + 清空 finished */}
       <div className="flex items-center gap-2 border-b border-moss-border px-3 py-1.5 text-[11px] text-ink-muted">
-        <Upload size={12} aria-hidden />
+        {activeUploads > 0 && <Upload size={12} aria-hidden />}
+        {activeDownloads > 0 && <Download size={12} aria-hidden />}
+        {active.length === 0 && <Upload size={12} className="opacity-50" aria-hidden />}
         <span>
           {active.length > 0
-            ? `${active.length} uploading`
+            ? `${activeUploads > 0 ? `${activeUploads} uploading` : ""}${activeUploads > 0 && activeDownloads > 0 ? " / " : ""}${activeDownloads > 0 ? `${activeDownloads} downloading` : ""}`
             : `${finished.length} finished`}
         </span>
         {hasFinished && active.length === 0 && (
@@ -112,7 +122,11 @@ export function UploadProgress({ sessionID, className }: UploadProgressProps) {
 
       {/* job rows */}
       {filtered.map((j) => (
-        <UploadRow key={j.transferID} job={j} onCancel={cancelUpload} />
+        <UploadRow
+          key={j.transferID}
+          job={j}
+          onCancel={(j.direction ?? "upload") === "download" ? cancelDownload : cancelUpload}
+        />
       ))}
     </div>
   );
@@ -125,7 +139,10 @@ interface UploadRowProps {
 
 function UploadRow({ job, onCancel }: UploadRowProps) {
   const pct = percentOf(job);
-  const filename = job.localPath.split("/").pop() ?? job.localPath;
+  const isDownload = (job.direction ?? "upload") === "download";
+  // v0.6.0：download 取 remotePath 末尾，upload 取 localPath 末尾
+  const displayPath = isDownload ? job.remotePath : job.localPath;
+  const filename = displayPath.split("/").pop() ?? displayPath;
   const isRunning = job.state === "running";
   const isCompleted = job.state === "completed";
   const isFailed = job.state === "failed" || job.state === "canceled";
@@ -140,11 +157,15 @@ function UploadRow({ job, onCancel }: UploadRowProps) {
   // 速度显示：completed/failed 时 0
   const bps = isRunning && job.speedBps ? job.speedBps : 0;
 
+  // 方向图标（v0.6.0 加）：active 状态左列显示方向小图标
+  const DirectionIcon = isDownload ? Download : Upload;
+
   return (
     <div
       className="flex items-center gap-2 border-b border-moss-border/40 px-3 py-1.5 text-[11px] last:border-b-0"
       data-testid="upload-progress-row"
       data-state={job.state}
+      data-direction={isDownload ? "download" : "upload"}
     >
       {/* 状态图标 */}
       <div className="shrink-0">
@@ -156,7 +177,8 @@ function UploadRow({ job, onCancel }: UploadRowProps) {
       {/* filename + 进度条 */}
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="truncate font-mono text-ink" title={job.localPath}>
+          <DirectionIcon size={10} className="shrink-0 text-ink-subtle" aria-hidden />
+          <span className="truncate font-mono text-ink" title={displayPath}>
             {filename}
           </span>
           <span className="shrink-0 text-ink-subtle">
@@ -171,7 +193,7 @@ function UploadRow({ job, onCancel }: UploadRowProps) {
             aria-valuenow={pct}
             aria-valuemin={0}
             aria-valuemax={100}
-            aria-label={`Upload progress: ${filename}`}
+            aria-label={`${isDownload ? "Download" : "Upload"} progress: ${filename}`}
           />
         </div>
       </div>
@@ -196,12 +218,12 @@ function UploadRow({ job, onCancel }: UploadRowProps) {
       {isRunning && (
         <button
           onClick={() => {
-            logger.info(`[UploadProgress] cancel ${job.transferID}`);
+            logger.info(`[UploadProgress] cancel ${job.transferID} (${isDownload ? "download" : "upload"})`);
             void onCancel(job.transferID);
           }}
           className="shrink-0 rounded border border-moss-border bg-moss-surface p-0.5 text-ink-muted hover:bg-state-err/20 hover:text-state-err"
           title="取消"
-          aria-label="取消上传"
+          aria-label={isDownload ? "取消下载" : "取消上传"}
         >
           <X size={12} />
         </button>

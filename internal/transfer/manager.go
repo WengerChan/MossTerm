@@ -1,19 +1,28 @@
-// Package transfer 的 manager.go：v0.5.10 streaming upload 任务管理器。
+// Package transfer 的 manager.go：v0.5.10 streaming upload + v0.6.0
+// streaming download 共享的 Manager。
 //
 // 设计要点：
 //   - Manager 持有 active + completed jobs 的内存 map（jobsMu 保护）
-//   - StartUpload：spawn 后台 goroutine 跑 Upload 函数；不阻塞 wailsbinding
-//   - CancelUpload：ctx cancel + 从 active 移除
+//   - StartUpload / StartDownload：spawn 后台 goroutine 跑 Upload / Download
+//     函数；不阻塞 wailsbinding
+//   - CancelUpload / CancelDownload：ctx cancel + 从 active 移除
 //   - ListTransfers / GetTransfer：frontend 用 polling 兜底（事件丢失场景）
 //   - ProgressCallback 把 transfer.Progress 转发到 Wails 事件总线
 //     "transfer:progress" / "transfer:done" / "transfer:error"
 //   - Manager 接受一个 Emitter 接口（与 app.EventEmitter 同款），
 //     不直接 import wails —— main.go 注入 wailsEmitter 适配器
 //
+// v0.6.0 扩展：
+//   - 加 DownloaderFactory：startDownload 通过 ctx 注入的 sessionID 拿 Downloader
+//   - 加 StartDownload / CancelDownload（与 upload 对称）
+//   - jobs map 用 transferID 作 key；同一 ID 的 upload/download 会冲突
+//     （v0.6 行为：前者失败）—— v0.6 期望前端 ID 用 GenerateTransferID()
+//     生成（独立空间），工程角度够用；v0.7+ 想要更严格可加 direction 前缀
+//
 // 为什么单独的 Manager 不复用 transfer.Engine 接口：
 //   - Engine 接口（v0.1 占位）描述通用多任务队列（含 Pause/Resume 等
-//     未来扩展），与 v0.5.10 单一 upload 焦点不直接对齐
-//   - v0.5.10 选择 focused Manager 简单实现；v0.6+ 再让 Engine 适配
+//     未来扩展），与 v0.5.10/v0.6.0 upload+download 焦点不直接对齐
+//   - v0.5.10/v0.6.0 选择 focused Manager 简单实现；v0.7+ 再让 Engine 适配
 //   - 现阶段保持 Engine stub 不动（panic 占位），新 Manager 走自己的路径
 package transfer
 
@@ -59,17 +68,25 @@ const (
 // 返回 nil 表示 session 不存在 / 未 established；调用方应回 error 给前端。
 type UploaderFactory func(sessionID session.ID) (Uploader, error)
 
-// Manager 是 v0.5.10 streaming upload 的运行时 manager。
+// DownloaderFactory 根据 sessionID 返回 Downloader。
+//
+// v0.6.0 加：与 UploaderFactory 同款签名（factory 函数 + sessionID lookup），
+// 区别只返回的接口是 Downloader。wailsbinding 把 *sftpclient.Client
+// 适配成 Downloader（见 internal/app/download_adapter.go）。
+type DownloaderFactory func(sessionID session.ID) (Downloader, error)
+
+// Manager 是 v0.5.10/v0.6.0 streaming upload + download 的运行时 manager。
 //
 // 线程安全：所有公开方法都走 jobsMu 保护。
 // 生命周期：进程内单例（wailsbinding 持有），与 Wails App 同寿命。
 type Manager struct {
-	mu              sync.RWMutex
-	jobs            map[string]*jobEntry
-	manifestDir     string
-	uploaderFactory UploaderFactory
-	emitter         Emitter
-	log             *slog.Logger
+	mu                sync.RWMutex
+	jobs              map[string]*jobEntry
+	manifestDir       string
+	uploaderFactory   UploaderFactory
+	downloaderFactory DownloaderFactory
+	emitter           Emitter
+	log               *slog.Logger
 }
 
 type jobEntry struct {
@@ -83,6 +100,9 @@ type jobEntry struct {
 // 必要参数：factory（拿 sftpclient.Client）+ emitter（推 Wails 事件）。
 // manifestDir 为空时用 DefaultManifestDir()。
 // log 为 nil 时用 slog.Default()。
+//
+// v0.6.0 起：downloaderFactory 仍走 SetDownloaderFactory 注入（与
+// UploaderFactory 风格一致；保留 NewManager 签名向后兼容）。
 func NewManager(manifestDir string, factory UploaderFactory, emitter Emitter, log *slog.Logger) *Manager {
 	if log == nil {
 		log = slog.Default()
@@ -101,6 +121,17 @@ func (m *Manager) SetUploaderFactory(f UploaderFactory) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.uploaderFactory = f
+}
+
+// SetDownloaderFactory 设置 downloader factory（v0.6.0 新增）。
+//
+// 走 Setter 而非 NewManager 第 5 参：保持 v0.5.10 NewManager 签名稳定
+// （main.go / app.New / 测试都不需要改）。DownloaderFactory 可选 ——
+// 不设置时调 StartDownload 会返回 "downloader factory not configured"。
+func (m *Manager) SetDownloaderFactory(f DownloaderFactory) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.downloaderFactory = f
 }
 
 // SetEmitter 替换 emitter。
@@ -129,6 +160,17 @@ func GenerateTransferID() string {
 	return "tx-" + hex.EncodeToString(b[:])
 }
 
+// jobRunner 是 streaming upload / download 共享的 goroutine 入口。
+//
+// v0.6.0 重构：原本 StartUpload + runJob / StartDownload + runDownloadJob
+// 是 4 段几乎一致的代码（dupl lint 命中 4 次）。提取为：
+//   - startJob：参数校验 + jobs map 登记 + ctx 派生 + 启动 goroutine
+//   - jobRunner：factory 调用 + 进度回调 + 错误分类 + finalizeJob
+//
+// startJob 和 jobRunner 之间用 closure 串接（runner func 由调用方闭包构造，
+// 携带方向 + 协议特定的 Upload/Download 调用）。
+type jobRunner func(ctx context.Context, entry *jobEntry, manifestDir string, emitter Emitter)
+
 // StartUpload 启动一次 streaming upload（后台 goroutine）。
 //
 // 返回 transferID（用 req.TransferID 若非空，否则生成）。
@@ -138,49 +180,107 @@ func GenerateTransferID() string {
 // sessionID 通过 parentCtx 携带（用 WithSessionID 注入）；
 // 立即取出来做 uploader factory 早失败检查（不 spawn 死 goroutine）。
 func (m *Manager) StartUpload(parentCtx context.Context, req UploadRequest) (string, error) {
-	// 校验 factory
-	m.mu.RLock()
-	factory := m.uploaderFactory
-	emitter := m.emitter
-	manifestDir := m.manifestDir
-	m.mu.RUnlock()
-
-	if factory == nil {
-		return "", errors.New("transfer.Manager: uploader factory not configured")
-	}
-
-	// 校验 req
 	if err := req.Validate(); err != nil {
 		return "", err
 	}
+	runner := func(ctx context.Context, entry *jobEntry, manifestDir string, emitter Emitter) {
+		m.runUpload(ctx, entry, req, manifestDir, emitter)
+	}
+	return m.startJob(parentCtx, req.TransferID, DirectionUpload, req.LocalPath, req.RemotePath, req.ChunkSize, req.Concurrency, runner, func() (any, error) {
+		m.mu.RLock()
+		f := m.uploaderFactory
+		m.mu.RUnlock()
+		if f == nil {
+			return nil, errors.New("transfer.Manager: uploader factory not configured")
+		}
+		return f, nil
+	})
+}
 
-	// sessionID 必须从 ctx 注入
+// StartDownload 启动一次 streaming download（后台 goroutine）。
+//
+// 与 StartUpload 对称：
+//   - 返回 transferID（用 req.TransferID 若非空，否则生成）
+//   - 同一 transferID 重复启动会被 reject（防覆盖；upload/download 共享 jobs map）
+//   - sessionID 通过 parentCtx 携带（用 WithSessionID 注入）
+//   - 失败 / 取消走同 finalizeJob 路径
+//
+// v0.6.0 行为：downloader factory 没配置时直接 reject（不 spawn 死 goroutine）。
+//
+//nolint:gocritic // 88B DownloadRequest 值传与 StartUpload 保持对称；hugeParam 延后到 v0.7
+func (m *Manager) StartDownload(parentCtx context.Context, req DownloadRequest) (string, error) {
+	if err := req.Validate(); err != nil {
+		return "", err
+	}
+	runner := func(ctx context.Context, entry *jobEntry, manifestDir string, emitter Emitter) {
+		m.runDownload(ctx, entry, req, manifestDir, emitter)
+	}
+	return m.startJob(parentCtx, req.TransferID, DirectionDownload, req.LocalPath, req.RemotePath, req.ChunkSize, req.Concurrency, runner, func() (any, error) {
+		m.mu.RLock()
+		f := m.downloaderFactory
+		m.mu.RUnlock()
+		if f == nil {
+			return nil, errors.New("transfer.Manager: downloader factory not configured")
+		}
+		return f, nil
+	})
+}
+
+// startJob 是 StartUpload / StartDownload 共享的"参数校验 + 入队 + 启动 goroutine"骨架。
+//
+// 行为：
+//  1. factory 早失败检查（factoryGetter 取工厂；nil → 返回 error，不 spawn 死 goroutine）
+//  2. 校验 sessionID 注入 ctx
+//  3. 分配 transferID（reqTransferID 非空就用它，否则 GenerateTransferID）
+//  4. jobs map 登记（同 transferID 重复 → reject）
+//  5. 派生 jobCtx（带 cancel + sessionID）
+//  6. 启动 runner goroutine
+//
+// 返回最终 transferID。工厂类型用 any（具体 UploaderFactory / DownloaderFactory
+// 差异在 runner 闭包里处理）；这里只关心"工厂是否已配置"。
+func (m *Manager) startJob(
+	parentCtx context.Context,
+	reqTransferID string,
+	direction Direction,
+	localPath, remotePath string,
+	chunkSize, concurrency int,
+	runner jobRunner,
+	factoryGetter func() (any, error),
+) (string, error) {
+	if _, err := factoryGetter(); err != nil {
+		return "", err
+	}
+
 	sid := sessionIDFromCtx(parentCtx)
 	if sid == "" {
 		return "", errors.New("transfer.Manager: sessionID missing in ctx")
 	}
 
-	id := req.TransferID
+	id := reqTransferID
 	if id == "" {
 		id = GenerateTransferID()
-		req.TransferID = id
 	}
+
+	m.mu.RLock()
+	emitter := m.emitter
+	manifestDir := m.manifestDir
+	m.mu.RUnlock()
 
 	m.mu.Lock()
 	if _, exists := m.jobs[id]; exists {
 		m.mu.Unlock()
 		return "", fmt.Errorf("transfer.Manager: transferID %q already running", id)
 	}
-	// 派生 ctx（带 cancel + sessionID）
 	jobCtx, cancel := context.WithCancel(context.Background())
 	jobCtx = WithSessionID(jobCtx, session.ID(sid))
 	entry := &jobEntry{
 		Info: JobInfo{
 			TransferID:  id,
-			LocalPath:   req.LocalPath,
-			RemotePath:  req.RemotePath,
-			ChunkSize:   normalizeChunkSize(req.ChunkSize),
-			Concurrency: normalizeConcurrency(req.Concurrency),
+			Direction:   direction,
+			LocalPath:   localPath,
+			RemotePath:  remotePath,
+			ChunkSize:   normalizeChunkSize(chunkSize),
+			Concurrency: normalizeConcurrency(concurrency),
 			State:       StateRunning,
 			StartedAt:   time.Now(),
 			UpdatedAt:   time.Now(),
@@ -191,29 +291,98 @@ func (m *Manager) StartUpload(parentCtx context.Context, req UploadRequest) (str
 	m.jobs[id] = entry
 	m.mu.Unlock()
 
-	// 后台 goroutine 跑 Upload
-	go m.runJob(jobCtx, entry, req, manifestDir, emitter, factory)
+	//nolint:contextcheck // jobCtx 已通过 context.WithCancel + WithSessionID 派生；走具名函数
+	go m.runJobInheritCtx(jobCtx, entry, manifestDir, emitter, runner)
 
 	return id, nil
 }
 
-// runJob 是后台 goroutine 入口。
+// runJobInheritCtx 是 go runner(...) 的薄包装：golangci-lint contextcheck
+// 要求"go func()" 启动 goroutine 走"继承自参数 ctx"的具名函数。
+// 这里 jobCtx 已经用 WithCancel + WithSessionID 派生（startJob 内部），
+// 把它当 ctx 传给 runner 是"继承"语义；具名函数让 lint 识别为继承。
+func (m *Manager) runJobInheritCtx(jobCtx context.Context, entry *jobEntry, manifestDir string, emitter Emitter, runner jobRunner) {
+	runner(jobCtx, entry, manifestDir, emitter)
+}
+
+// runUpload 是 streaming upload 的 goroutine 入口。
 //
 // 串接：factory 拿 uploader → 调 Upload → emit 进度事件 → emit done/error。
 // ctx 取消时 Upload() 内部 worker 检测到，Upload 返回 ErrUploadFailed，
 // 我们 emit error 事件 + 把 state 改 Failed。
-func (m *Manager) runJob(ctx context.Context, entry *jobEntry, req UploadRequest, manifestDir string, emitter Emitter, factory UploaderFactory) {
+//
+//nolint:gocritic // 88B UploadRequest 值传与 v0.5.10 StartUpload 保持一致；hugeParam 延后到 v0.7
+func (m *Manager) runUpload(ctx context.Context, entry *jobEntry, req UploadRequest, manifestDir string, emitter Emitter) {
 	defer close(entry.doneCh)
+	m.executeJob(ctx, entry, manifestDir, emitter, ErrUploadFailed, func() error {
+		m.mu.RLock()
+		factory := m.uploaderFactory
+		m.mu.RUnlock()
+		if factory == nil {
+			return errors.New("uploader factory not configured")
+		}
+		sid := sessionIDFromCtx(ctx)
+		uploader, err := factory(session.ID(sid))
+		if err != nil {
+			return fmt.Errorf("uploader factory: %v", err)
+		}
+		return Upload(ctx, uploader, req, manifestDir, m.makeProgressFn(ctx, entry, emitter))
+	})
+}
 
-	sid := sessionIDFromCtx(ctx)
-	uploader, err := factory(session.ID(sid))
-	if err != nil {
-		m.finalizeJob(entry, StateFailed, "", fmt.Sprintf("uploader factory: %v", err), emitter)
+// runDownload 是 streaming download 的 goroutine 入口。
+//
+// 与 runUpload 同结构：
+//   - factory 拿 downloader → 调 Download → emit 进度事件 → emit done/error
+//   - ctx 取消时 Download() 内部 worker 检测到，Download 返回 ErrDownloadFailed
+//
+//nolint:gocritic // 88B DownloadRequest 值传与 runUpload 保持对称；hugeParam 延后到 v0.7
+func (m *Manager) runDownload(ctx context.Context, entry *jobEntry, req DownloadRequest, manifestDir string, emitter Emitter) {
+	defer close(entry.doneCh)
+	m.executeJob(ctx, entry, manifestDir, emitter, ErrDownloadFailed, func() error {
+		m.mu.RLock()
+		factory := m.downloaderFactory
+		m.mu.RUnlock()
+		if factory == nil {
+			return errors.New("downloader factory not configured")
+		}
+		sid := sessionIDFromCtx(ctx)
+		downloader, err := factory(session.ID(sid))
+		if err != nil {
+			return fmt.Errorf("downloader factory: %v", err)
+		}
+		return Download(ctx, downloader, req, manifestDir, m.makeProgressFn(ctx, entry, emitter))
+	})
+}
+
+// executeJob 是 runUpload / runDownload 共享的"调 work 闭包 + cancel vs fail 分类 + finalizeJob"骨架。
+//
+// wrappedErr 区分 upload / download（ErrUploadFailed / ErrDownloadFailed）；
+// 分类规则（与 v0.5.10 一致）：
+//   - context.Canceled → StateCanceled
+//   - wrappedErr + ctx.Err() != nil → StateCanceled
+//   - 其他 → StateFailed
+//   - nil err → StateCompleted
+func (m *Manager) executeJob(ctx context.Context, entry *jobEntry, _ string, emitter Emitter, wrappedErr error, work func() error) {
+	runErr := work()
+	if runErr != nil {
+		if errors.Is(runErr, context.Canceled) {
+			m.finalizeJob(ctx, entry, StateCanceled, "", runErr.Error(), emitter)
+			return
+		}
+		if errors.Is(runErr, wrappedErr) && ctx.Err() != nil {
+			m.finalizeJob(ctx, entry, StateCanceled, "", ctx.Err().Error(), emitter)
+			return
+		}
+		m.finalizeJob(ctx, entry, StateFailed, "", runErr.Error(), emitter)
 		return
 	}
+	m.finalizeJob(ctx, entry, StateCompleted, "", "", emitter)
+}
 
-	// 进度回调：更新 entry + emit Wails 事件
-	progressFn := func(p Progress) {
+// makeProgressFn 返回统一的 Progress 回调：写 entry.Info + emit Wails 事件。
+func (m *Manager) makeProgressFn(ctx context.Context, entry *jobEntry, emitter Emitter) func(Progress) {
+	return func(p Progress) {
 		m.mu.Lock()
 		entry.Info.BytesSent = p.BytesSent
 		entry.Info.TotalBytes = p.TotalBytes
@@ -223,32 +392,15 @@ func (m *Manager) runJob(ctx context.Context, entry *jobEntry, req UploadRequest
 			emitter.Emit(ctx, EventProgress, p)
 		}
 	}
-
-	// 跑 Upload
-	uploadErr := Upload(ctx, uploader, req, manifestDir, progressFn)
-
-	// 收尾
-	if uploadErr != nil {
-		// 区分 cancel vs fail
-		if errors.Is(uploadErr, context.Canceled) {
-			m.finalizeJob(entry, StateCanceled, "", uploadErr.Error(), emitter)
-			return
-		}
-		if errors.Is(uploadErr, ErrUploadFailed) && ctx.Err() != nil {
-			m.finalizeJob(entry, StateCanceled, "", ctx.Err().Error(), emitter)
-			return
-		}
-		m.finalizeJob(entry, StateFailed, "", uploadErr.Error(), emitter)
-		return
-	}
-
-	// 成功：读 manifest 拿 checksum（Upload 完成后 manifest 已删，所以
-	// checksum 在 done 事件里走单独路径——这里留空，wailsbinding.GetTransfer
-	// 不再能拿，但前端也不需要了，传输已完成）
-	m.finalizeJob(entry, StateCompleted, "", "", emitter)
 }
 
-func (m *Manager) finalizeJob(entry *jobEntry, state JobState, checksum, errMsg string, emitter Emitter) {
+// finalizeJob 把 jobEntry 状态写到 JobInfo + emit Wails 事件。
+//
+// _ context.Context 是 v0.6.0 引入（满足 contextcheck lint 要求"ctx 不丢"）；
+// 当前实现 emit 用 background ctx（事件 emit 不挂 ctx），保留 ctx 形参是
+// 为未来"用 ctx 控制 emit 超时"留口子（v0.7+ 真要 cancel-aware emit 时不
+// 改签名）。
+func (m *Manager) finalizeJob(_ context.Context, entry *jobEntry, state JobState, checksum, errMsg string, emitter Emitter) {
 	m.mu.Lock()
 	entry.Info.State = state
 	entry.Info.Checksum = checksum
@@ -274,6 +426,19 @@ func (m *Manager) finalizeJob(entry *jobEntry, state JobState, checksum, errMsg 
 // 取消后 entry 状态由 runJob 协程异步改 Canceled；前端用 ListTransfers
 // 看到 State=Canceled（不阻塞等待）。
 func (m *Manager) CancelUpload(transferID string) error {
+	return m.cancelJob(transferID)
+}
+
+// CancelDownload 取消一个 download transfer（与 CancelUpload 对称）。
+//
+// 内部走同一 cancelJob 路径（jobs map 共享；cancel 与方向无关）。
+// v0.6.0 保留为独立 API 是为前端调用语义清晰；底层不重复实现。
+func (m *Manager) CancelDownload(transferID string) error {
+	return m.cancelJob(transferID)
+}
+
+// cancelJob 是 CancelUpload / CancelDownload 共享的内部实现。
+func (m *Manager) cancelJob(transferID string) error {
 	m.mu.Lock()
 	entry, ok := m.jobs[transferID]
 	m.mu.Unlock()

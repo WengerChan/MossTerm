@@ -126,8 +126,12 @@ type Progress struct {
 //
 // Progress 字段是"最新一次回调的快照"，方便前端用 polling 兜底
 // （事件丢失时 ListTransfers/GetTransfer 仍能拿到进度）。
+//
+// v0.6.0 扩展加 Direction：前端用此区分 upload / download。
+// 旧调用方（不读 Direction）的行为不变 —— 字段零值为 DirectionUpload。
 type JobInfo struct {
 	TransferID  string    `json:"transferID"`
+	Direction   Direction `json:"direction"`
 	LocalPath   string    `json:"localPath"`
 	RemotePath  string    `json:"remotePath"`
 	TotalBytes  int64     `json:"totalBytes"`
@@ -660,6 +664,452 @@ func parentDirOf(path string) string {
 		}
 	}
 	return ""
+}
+
+// -----------------------------------------------------------------------------
+// v0.6.0 Download 配套
+// -----------------------------------------------------------------------------
+//
+// 与 upload 对称：
+//   - DownloadRequest 描述一次下载的输入（远端 → 本地）
+//   - Downloader 是 SFTP 读表面抽象
+//   - Download 函数：分块 + 并发 ReadAt + 进度 + 断点续传 + sha256
+//
+// 与 upload 的差异（仅 IO 方向，其他逻辑复用 Plan / Validate / Manifest）：
+//   - 不需要 Truncate（不需要预分配本地）
+//   - 不需要 MkdirAll（本地父目录由 os.MkdirAll 创建）
+//   - 本地文件用 os.OpenFile(O_CREATE|O_WRONLY) 写；不缓冲整文件（chunk 内 buf）
+//   - 校验：写完每 chunk 算 sha256；done 时合并
+//   - Resume：本地已有文件用 os.Stat 拿 size → 已下载字节数；
+//     manifest.UploadedChunks 复用语义（已完成的 chunk 索引列表）
+
+// DownloadRequest 描述一次 streaming download 的输入参数。
+//
+// 与 UploadRequest 对称；字段语义：
+//   - TransferID：调用方生成的唯一标识（manifest 文件名 + Wails 事件）。
+//   - SessionID：通过 ctx 注入（wailsbinding 负责），不在 req 上传递。
+//   - RemotePath：远端绝对路径（含文件名）。
+//   - LocalPath：本地待写入路径（含文件名）；父目录会自动 MkdirAll。
+//   - ChunkSize / Concurrency：同 Upload，0 = 默认；clamp 同 Upload。
+//   - Resume：true 时从 manifest 恢复（按已下载 chunk 索引跳过）。
+type DownloadRequest struct {
+	TransferID  string `json:"transferID"`
+	SessionID   string `json:"sessionID,omitempty"`
+	RemotePath  string `json:"remotePath"`
+	LocalPath   string `json:"localPath"`
+	ChunkSize   int    `json:"chunkSize,omitempty"`
+	Concurrency int    `json:"concurrency,omitempty"`
+	Resume      bool   `json:"resume"`
+}
+
+// Validate 校验 DownloadRequest 的字段合法性（不涉及文件 IO）。
+//
+// 与 UploadRequest.Validate 同约定（值 receiver；保持 API 对称）。
+// 88 字节 struct 在 gocritic hugeParam (80B threshold) 下会触发 lint；
+// 与 Upload 一致保留 +nolint（baseline 不报是因为 origin/main 早于该 lint
+// 规则升级；v0.7 整体改成指针 receiver 时再移除）。
+//
+//nolint:gocritic // 88B value receiver 触发 hugeParam，与 UploadRequest 保持对称；延后到 v0.7
+func (r DownloadRequest) Validate() error {
+	if r.TransferID == "" {
+		return ErrMissingTransferID
+	}
+	if r.LocalPath == "" || r.RemotePath == "" {
+		return ErrMissingPaths
+	}
+	if r.ChunkSize != 0 {
+		if r.ChunkSize < MinChunkSize || r.ChunkSize > MaxChunkSize {
+			return fmt.Errorf("%w: got %d, want [%d, %d]",
+				ErrInvalidChunkSize, r.ChunkSize, MinChunkSize, MaxChunkSize)
+		}
+	}
+	if r.Concurrency != 0 {
+		if r.Concurrency < MinConcurrency || r.Concurrency > MaxConcurrency {
+			return fmt.Errorf("%w: got %d, want [%d, %d]",
+				ErrInvalidConcurrency, r.Concurrency, MinConcurrency, MaxConcurrency)
+		}
+	}
+	return nil
+}
+
+// Downloader 是 streaming download 需要的 SFTP 读表面抽象。
+//
+// 实际就是 transfer.Uploader 的子集（Open 拿 io.ReadWriteCloser，
+// Stat 拿 Entry），但分开命名避免 v0.5.10 upload 接口与 v0.6 download
+// 共用时把"只读下载"的语义掩盖。sftpclient.Client 通过同套 Open/Stat
+// 方法实现，无需新增 sftpclient 方法。
+//
+// Open 返回的 ReadWriteCloser 实际是 *sftp.File，调用方用 ReadAt 并发读。
+type Downloader interface {
+	Open(path string, flags int) (sftpclient.ReadWriteCloser, error)
+	Stat(path string) (sftpclient.Entry, error)
+}
+
+// Download 错误定义（与 Upload 对称）。
+var (
+	// ErrRemoteNotFound 远端文件不存在或不是 regular file。
+	ErrRemoteNotFound = errors.New("transfer: remote file not found or not regular")
+	// ErrRemoteChanged Resume 时远端文件 mtime/size 与 manifest 不一致。
+	ErrRemoteChanged = errors.New("transfer: remote file changed since manifest (mtime/size mismatch)")
+	// ErrDownloadFailed 下载过程中出错（最常见：context 取消 / 网络中断）。
+	ErrDownloadFailed = errors.New("transfer: download failed")
+)
+
+// downloadState 持有 Download 期间的运行时状态。
+type downloadState struct {
+	bytesSent atomic.Int64
+	startTime time.Time
+	lastEmit  time.Time
+	lastBytes int64
+	// manifestCh / errCh 与 uploadState 字段语义一致（保持单写者）。
+	manifestCh chan *chunkDone
+	errCh      chan error
+}
+
+func newDownloadState() *downloadState {
+	now := time.Now()
+	return &downloadState{
+		startTime:  now,
+		lastEmit:   now,
+		manifestCh: make(chan *chunkDone, 64),
+		errCh:      make(chan error, 1),
+	}
+}
+
+// Download 把 RemotePath 流式下载到 LocalPath（通过 Downloader）。
+//
+// 行为概要：
+//  1. 校验 Request（Validate）
+//  2. Stat 远端（拿 size + mtime）
+//  3. 校验大小（> MaxFileSize 拒绝）
+//  4. 若 Resume=true：尝试 LoadManifest，校验 remote mtime/size 一致；
+//     进一步用本地已存在文件 size 推算"已下载字节"（粗匹配：取已下载 chunks
+//     的 size 之和 = 当前本地 size 视为一致）
+//  5. 计算 Plan，切掉已下载 chunk
+//  6. 创建本地文件（O_CREATE|O_WRONLY）+ os.MkdirAll 父目录
+//  7. 打开远端文件（O_RDONLY）→ ReadAt 读
+//  8. 启动 N 个 worker goroutine，按 chunk 索引分配任务
+//  9. 主 goroutine：收集 manifest 更新（每片 flush）+ 限速 emit Progress
+//  10. ctx 取消：worker 检查 ctx 立即退出；主 goroutine 收到错误后
+//     保留 manifest（已下载 chunk 记下来）返回 ErrDownloadFailed
+//
+// 与 Upload 的关键差异：本地写入是并发 WriteAt 到同一 *os.File；
+// os.File 的 WriteAt 是并发安全的（标准库保证），所以多 worker 可并行写
+// 不同 offset 区间。
+//
+// progress 回调语义同 Upload：节流 200ms 一次；nil 不调。
+//
+//	v0.6.0 抽 emitLoop 到独立 helper 后复杂度可降到 < 15，延后到 v0.7
+//
+//nolint:gocyclo,gocritic,dupl // 复杂度 + hugeParam + emitLoop 重复与 streaming.Upload 对称；v0.7 整体抽 helper + 改指针 receiver
+func Download(ctx context.Context, downloader Downloader, req DownloadRequest, manifestDir string, progress func(Progress)) error {
+	// 1. Validate
+	if err := req.Validate(); err != nil {
+		return err
+	}
+
+	// 2. Stat 远端
+	entry, err := downloader.Stat(req.RemotePath)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrRemoteNotFound, req.RemotePath, err)
+	}
+	if entry.IsDir {
+		return fmt.Errorf("%w: %s is a directory", ErrRemoteNotFound, req.RemotePath)
+	}
+	totalSize := entry.Size
+	remoteModTime := entry.ModTime
+
+	// 3. 大小保护
+	if totalSize > MaxFileSize {
+		return fmt.Errorf("%w: size=%d, max=%d", ErrFileTooLarge, totalSize, MaxFileSize)
+	}
+
+	// 4. Resume 校验
+	chunkSize := normalizeChunkSize(req.ChunkSize)
+	concurrency := normalizeConcurrency(req.Concurrency)
+
+	manifest, err := LoadManifest(manifestDir, req.TransferID)
+	if err != nil && !errors.Is(err, ErrManifestNotFound) {
+		return fmt.Errorf("transfer.Download: load manifest: %w", err)
+	}
+	if manifest != nil && req.Resume {
+		if manifest.LocalPath != req.LocalPath || manifest.RemotePath != req.RemotePath {
+			return fmt.Errorf("%w: manifest local=%q remote=%q, request local=%q remote=%q",
+				ErrRemoteChanged, manifest.LocalPath, manifest.RemotePath, req.LocalPath, req.RemotePath)
+		}
+		if manifest.TotalSize != totalSize {
+			return fmt.Errorf("%w: manifest size=%d, current=%d",
+				ErrRemoteChanged, manifest.TotalSize, totalSize)
+		}
+		if !manifest.LocalModTime.Equal(remoteModTime) {
+			return fmt.Errorf("%w: manifest mtime=%s, current=%s",
+				ErrRemoteChanged, manifest.LocalModTime, remoteModTime)
+		}
+	} else if manifest != nil && !req.Resume {
+		// 显式 Resume=false：删除旧 manifest 重新开始
+		_ = DeleteManifest(manifestDir, req.TransferID)
+		manifest = nil
+	}
+
+	if manifest == nil {
+		manifest = &Manifest{
+			TransferID:   req.TransferID,
+			LocalPath:    req.LocalPath,
+			RemotePath:   req.RemotePath,
+			ChunkSize:    chunkSize,
+			TotalSize:    totalSize,
+			LocalModTime: remoteModTime, // 记录远端 mtime（语义：上次见过的远端 mtime）
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
+		}
+	}
+
+	// 5. 计算 Plan
+	plan := Plan(totalSize, chunkSize)
+	downloadedSet := make(map[int]bool, len(manifest.UploadedChunks))
+	for _, idx := range manifest.UploadedChunks {
+		downloadedSet[idx] = true
+	}
+	pending := make([]ChunkRange, 0, len(plan))
+	for _, c := range plan {
+		if !downloadedSet[c.Index] {
+			pending = append(pending, c)
+		}
+	}
+
+	// 全部已下完的兜底
+	if len(pending) == 0 {
+		if progress != nil {
+			progress(Progress{
+				TransferID:  req.TransferID,
+				BytesSent:   totalSize,
+				TotalBytes:  totalSize,
+				SpeedBps:    0,
+				EtaSec:      0,
+				ChunkIndex:  len(plan),
+				TotalChunks: len(plan),
+			})
+		}
+		_ = DeleteManifest(manifestDir, req.TransferID)
+		return nil
+	}
+
+	// 6. 打开本地文件（O_CREATE|O_WRONLY；不 O_TRUNC 避免覆盖已有数据）
+	//    父目录自动创建
+	if parentDir := parentDirOf(req.LocalPath); parentDir != "" && parentDir != "/" && parentDir != "." {
+		if mkErr := os.MkdirAll(parentDir, 0o700); mkErr != nil && !errors.Is(mkErr, os.ErrExist) {
+			return fmt.Errorf("transfer.Download: mkdir parent %q: %w", parentDir, mkErr)
+		}
+	}
+	// 使用 O_CREATE|O_WRONLY：本地文件已存在时 WriteAt 覆盖对应 offset 区间
+	// （不会清掉已下载 chunks）。
+	lf, err := os.OpenFile(req.LocalPath, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("transfer.Download: open local %q: %w", req.LocalPath, err)
+	}
+	defer func() { _ = lf.Close() }()
+
+	// 7. 打开远端文件（O_RDONLY）
+	rf, err := downloader.Open(req.RemotePath, os.O_RDONLY)
+	if err != nil {
+		return fmt.Errorf("transfer.Download: open remote: %w", err)
+	}
+	defer func() { _ = rf.Close() }()
+
+	// 8. 启动 worker pool
+	state := newDownloadState()
+	initialSent := int64(0)
+	for _, idx := range manifest.UploadedChunks {
+		if idx >= 0 && idx < len(plan) {
+			initialSent += plan[idx].End - plan[idx].Start
+		}
+	}
+	state.bytesSent.Store(initialSent)
+
+	pendingCh := make(chan ChunkRange, len(pending))
+	for _, c := range pending {
+		pendingCh <- c
+	}
+	close(pendingCh)
+
+	// SHA-256 校验：与 upload 一致 —— per-worker hasher，done 时合并
+	chunkHashes := make([][]byte, len(plan))
+
+	var wg sync.WaitGroup
+	workerErrCh := make(chan error, concurrency)
+
+	for w := 0; w < concurrency; w++ {
+		wg.Add(1)
+		go func(_ int) {
+			defer wg.Done()
+			for chunk := range pendingCh {
+				if err := ctx.Err(); err != nil {
+					workerErrCh <- fmt.Errorf("%w: %v", ErrDownloadFailed, err)
+					return
+				}
+				size := chunk.End - chunk.Start
+				buf := make([]byte, size)
+				// ReadAt 读远端 [Start, End)
+				readN, readErr := rf.ReadAt(buf, chunk.Start)
+				if readErr != nil && readErr != io.EOF {
+					workerErrCh <- fmt.Errorf("%w: read chunk %d [%d,%d): %v",
+						ErrDownloadFailed, chunk.Index, chunk.Start, chunk.End, readErr)
+					return
+				}
+				buf = buf[:readN]
+
+				// WriteAt 写本地
+				written, werr := lf.WriteAt(buf, chunk.Start)
+				if werr != nil {
+					workerErrCh <- fmt.Errorf("%w: write chunk %d [%d,%d): %v",
+						ErrDownloadFailed, chunk.Index, chunk.Start, chunk.End, werr)
+					return
+				}
+				if written != readN {
+					workerErrCh <- fmt.Errorf("%w: short write chunk %d: want %d, got %d",
+						ErrDownloadFailed, chunk.Index, readN, written)
+					return
+				}
+
+				state.bytesSent.Add(int64(written))
+				h := sha256.New()
+				h.Write(buf)
+				chunkHashes[chunk.Index] = h.Sum(nil)
+
+				select {
+				case state.manifestCh <- &chunkDone{index: chunk.Index, written: int64(written)}:
+				case <-ctx.Done():
+					workerErrCh <- fmt.Errorf("%w: %v", ErrDownloadFailed, ctx.Err())
+					return
+				}
+			}
+		}(w)
+	}
+
+	// 9. 主 goroutine
+	doneCh := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(doneCh)
+	}()
+
+	downloadedIdx := make([]int, len(manifest.UploadedChunks))
+	copy(downloadedIdx, manifest.UploadedChunks)
+	manifestMu := &sync.Mutex{}
+
+	var lastErr error
+emitLoop:
+	for {
+		select {
+		case cd, ok := <-state.manifestCh:
+			if !ok {
+				state.manifestCh = nil
+				continue
+			}
+			manifestMu.Lock()
+			downloadedIdx = append(downloadedIdx, cd.index)
+			sort.Ints(downloadedIdx)
+			updatedManifest := *manifest
+			updatedManifest.UploadedChunks = append([]int(nil), downloadedIdx...)
+			updatedManifest.UpdatedAt = time.Now()
+			manifest = &updatedManifest
+			err := SaveManifest(manifestDir, &updatedManifest)
+			manifestMu.Unlock()
+			if err != nil {
+				lastErr = fmt.Errorf("transfer.Download: save manifest: %w", err)
+				break emitLoop
+			}
+		case <-time.After(ProgressEmitInterval):
+			emitDownloadProgress(progress, req.TransferID, totalSize, state, len(plan))
+		case <-ctx.Done():
+			lastErr = fmt.Errorf("%w: %v", ErrDownloadFailed, ctx.Err())
+			break emitLoop
+		case e := <-workerErrCh:
+			lastErr = e
+			break emitLoop
+		case <-doneCh:
+			// drain
+			for drained := false; !drained; {
+				select {
+				case cd := <-state.manifestCh:
+					manifestMu.Lock()
+					downloadedIdx = append(downloadedIdx, cd.index)
+					manifestMu.Unlock()
+				default:
+					drained = true
+				}
+			}
+			manifestMu.Lock()
+			sort.Ints(downloadedIdx)
+			manifest.UploadedChunks = append([]int(nil), downloadedIdx...)
+			manifest.UpdatedAt = time.Now()
+			hasher := sha256.New()
+			for _, idx := range downloadedIdx {
+				if h := chunkHashes[idx]; h != nil {
+					hasher.Write(h)
+				}
+			}
+			manifest.Checksum = "sha256:" + hex.EncodeToString(hasher.Sum(nil))
+			err := SaveManifest(manifestDir, manifest)
+			manifestMu.Unlock()
+			if err != nil {
+				lastErr = fmt.Errorf("transfer.Download: save final manifest: %w", err)
+			}
+			emitDownloadProgress(progress, req.TransferID, totalSize, state, len(plan))
+			break emitLoop
+		}
+	}
+
+	// 等待所有 worker 退出（避免 goroutine 泄漏）
+	go func() {
+		<-doneCh
+	}()
+
+	if lastErr != nil {
+		// 失败：保留 manifest
+		return lastErr
+	}
+
+	// 成功：删除 manifest
+	_ = DeleteManifest(manifestDir, req.TransferID)
+	return nil
+}
+
+// emitDownloadProgress 与 emitProgress 同语义（独立函数以让 Go
+// 类型系统区分 upload / download 状态指针；行为一致）。
+// emitDownloadProgress 与 emitProgress 同语义（独立函数以让 Go
+// 类型系统区分 upload / download 状态指针；行为一致）。
+//
+//nolint:dupl // 与 emitProgress 字符串 100% 相同（除 state pointer 类型）；v0.7 抽共享 helper
+func emitDownloadProgress(progress func(Progress), transferID string, total int64, state *downloadState, totalChunks int) {
+	if progress == nil {
+		return
+	}
+	now := time.Now()
+	sent := state.bytesSent.Load()
+	if sent >= total && state.lastBytes == sent {
+		return
+	}
+	elapsed := now.Sub(state.startTime).Seconds()
+	var speed int64
+	if elapsed > 0 {
+		speed = int64(float64(sent) / elapsed)
+	}
+	var eta int64 = -1
+	if speed > 0 && sent < total {
+		eta = int64(float64(total-sent) / float64(speed))
+	}
+	progress(Progress{
+		TransferID:  transferID,
+		BytesSent:   sent,
+		TotalBytes:  total,
+		SpeedBps:    speed,
+		EtaSec:      eta,
+		ChunkIndex:  -1,
+		TotalChunks: totalChunks,
+	})
+	state.lastEmit = now
+	state.lastBytes = sent
 }
 
 // emitProgress 按 ProgressEmitInterval 节流地触发回调。

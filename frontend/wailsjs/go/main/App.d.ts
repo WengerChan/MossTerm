@@ -88,6 +88,15 @@ export class App {
   static CancelUpload(transferID: string): Promise<void>;
   static ListTransfers(): Promise<UploadJobInfo[]>;
   static GetTransfer(transferID: string): Promise<UploadJobInfo | null>;
+
+  // v0.6.0 SFTP streaming download：与 upload 对称（远端 → 本地）。
+  // 后端实现：internal/transfer/streaming.go::Download + wailsbindings StartDownload。
+  // 进度事件复用同名：transfer:progress / transfer:done / transfer:error；
+  // 前端通过 UploadJobInfo.direction 字段区分方向（"upload" / "download"）。
+  // 共享 ListTransfers / GetTransfer（jobs map 按 transferID 查，方向由 JobInfo.Direction 区分）。
+  // 断点续传：同 upload 路径，本地已下载部分通过 manifest.UploadedChunks 跳过。
+  static StartDownload(req: DownloadRequest): Promise<string>;
+  static CancelDownload(transferID: string): Promise<void>;
 }
 
 /** v0.5.10 SFTP streaming upload 请求（与 internal/transfer/streaming.go::UploadRequest 镜像）。 */
@@ -126,6 +135,8 @@ export interface UploadProgress {
 /** v0.5.10 SFTP streaming upload 任务信息（与 internal/transfer/manager.go::JobInfo 镜像）。 */
 export interface UploadJobInfo {
   transferID: string;
+  /** v0.6.0 加：方向；"upload"（默认）/ "download"。前端用此决定 UI 表现。 */
+  direction?: "upload" | "download";
   localPath: string;
   remotePath: string;
   totalBytes: number;
@@ -138,6 +149,24 @@ export interface UploadJobInfo {
   updatedAt: string;
   /** 传输完成后的 SHA-256（"sha256:<hex>"）；运行中为空 */
   checksum?: string;
+}
+
+/** v0.6.0 SFTP streaming download 请求（与 internal/transfer/streaming.go::DownloadRequest 镜像）。 */
+export interface DownloadRequest {
+  /** transfer ID（可空 → 自动生成）；Resume 模式必须传原 ID 续传 */
+  transferID: string;
+  /** 必传：sftp 连接的 session ID；wailsbinding 注入 ctx */
+  sessionID: string;
+  /** 远端绝对路径（含文件名） */
+  remotePath: string;
+  /** 本地写入绝对路径（含文件名）；父目录自动创建 */
+  localPath: string;
+  /** 分片字节数；0 = 4 MiB；范围 [1 MiB, 16 MiB] */
+  chunkSize?: number;
+  /** 并发 worker 数；0 = 2；范围 [1, 4] */
+  concurrency?: number;
+  /** true = 接续 manifest；false = 忽略旧 manifest 重新下载 */
+  resume: boolean;
 }
 
 /** v0.5.9 SFTP 文件预览元信息（与 internal/sftpclient/preview.go::PreviewMetadata 镜像）。 */

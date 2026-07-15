@@ -626,3 +626,74 @@ func (a *App) GetTransfer(ctx context.Context, transferID string) (transfer.JobI
 	}
 	return mgr.GetTransfer(transferID)
 }
+
+// -----------------------------------------------------------------------------
+// Streaming Download（v0.6.0）
+// -----------------------------------------------------------------------------
+//
+// 与 StartUpload 对称：
+//   - StartDownload 启动后台 goroutine 跑 transfer.Download
+//   - CancelDownload 取消（ctx cancel）
+//   - ListTransfers / GetTransfer 已在上方实现，共享 jobs map（按 transferID 查）；
+//     JobInfo.Direction 字段区分方向
+//
+// 进度事件复用同名：transfer:progress / transfer:done / transfer:error；
+// 前端用 JobInfo.Direction 判断是 upload 还是 download。
+//
+// sessionID 通过 Wails ctx 注入（req.SessionID → transfer.WithSessionID）；
+// Download 走内部拿 downloader factory（sftpUploader 的"只读姊妹"）。
+//
+// 错误：StartUpload 同款 + transfer.Download 内部错误（远端 mtime/size
+// 变化 / 文件过大 / 网络中断 / 本地 IO 失败）→ fmt.Errorf 包装。
+
+// StartDownload 启动一次 streaming download（后台 goroutine，非阻塞）。
+//
+// 调用栈（v0.6.0）：
+//  1. 前端右键 / 工具栏 "Download" 按钮
+//  2. App.StartDownload(ctx, req) → wailsbinding
+//  3. 注入 sessionID 到 ctx（req.SessionID → transfer.WithSessionID）
+//  4. 调 transfer.Manager.StartDownload
+//  5. Manager 后台 goroutine 跑 transfer.Download（分片 + 进度回调）
+//  6. 进度走 emitter.Emit("transfer:progress", p) → 前端 EventsOn 收到
+//  7. 完成 / 失败 / 取消 emit "transfer:done" / "transfer:error"
+//
+// 参数约定：
+//   - req.TransferID：可空（自动生成 UUID-style ID）；非空用于 Resume
+//   - req.SessionID：必传；前端从 active session 拿 → 注入 ctx
+//   - req.RemotePath：远端绝对路径
+//   - req.LocalPath：本地写入绝对路径；父目录自动 MkdirAll
+//   - req.ChunkSize / req.Concurrency：同 StartUpload 调参
+//   - req.Resume：true = 接续已有 manifest；false = 忽略旧 manifest 重新下载
+//
+//nolint:gocritic // 88B DownloadRequest 值传与 wailsbindings.StartUpload 保持对称
+func (a *App) StartDownload(ctx context.Context, req transfer.DownloadRequest) (string, error) {
+	mgr := a.core.DownloadManager()
+	if mgr == nil {
+		return "", errors.New("wailsbindings.StartDownload: download manager not initialized")
+	}
+	if req.SessionID == "" {
+		return "", errors.New("wailsbindings.StartDownload: empty sessionID in request")
+	}
+	ctx = transfer.WithSessionID(ctx, session.ID(req.SessionID))
+	id, err := mgr.StartDownload(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("wailsbindings.StartDownload: %w", err)
+	}
+	return id, nil
+}
+
+// CancelDownload 取消一个 download transfer。
+//
+// 立即返回（不等待 goroutine 退出）；前端用 ListTransfers 看 State 转 Canceled。
+//
+// 错误：transferID 不存在 / download manager 没初始化。
+func (a *App) CancelDownload(_ context.Context, transferID string) error {
+	mgr := a.core.DownloadManager()
+	if mgr == nil {
+		return errors.New("wailsbindings.CancelDownload: download manager not initialized")
+	}
+	if err := mgr.CancelDownload(transferID); err != nil {
+		return fmt.Errorf("wailsbindings.CancelDownload: %w", err)
+	}
+	return nil
+}

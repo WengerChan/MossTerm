@@ -211,6 +211,10 @@ func New(deps Deps) *App {
 		deps.Log.Error("app.New: transfer.NewManager returned nil")
 	}
 
+	// v0.6.0 注册 downloader factory（同 Manager 共享；jobs map + 事件
+	// 总线都共用，方向由 JobInfo.Direction 字段区分）。
+	a.uploadMgr.SetDownloaderFactory(a.makeDownloadFactory())
+
 	return a
 }
 
@@ -225,6 +229,20 @@ func (a *App) makeUploadFactory() transfer.UploaderFactory {
 			return nil, fmt.Errorf("app.makeUploadFactory: %w", err)
 		}
 		return &sftpUploader{Client: c}, nil
+	}
+}
+
+// makeDownloadFactory 返回 wailsbinding 用的 DownloaderFactory。
+//
+// v0.6.0 加：与 makeUploadFactory 同款，区别只把 sftpclient.Client
+// 适配成 transfer.Downloader（只暴露 Open / Stat 读表面）。
+func (a *App) makeDownloadFactory() transfer.DownloaderFactory {
+	return func(sid session.ID) (transfer.Downloader, error) {
+		c, err := a.SftpClient(sid)
+		if err != nil {
+			return nil, fmt.Errorf("app.makeDownloadFactory: %w", err)
+		}
+		return &sftpDownloader{Client: c}, nil
 	}
 }
 
@@ -349,7 +367,18 @@ func (a *App) Log() *slog.Logger { return a.log }
 //
 // 供 wailsbindings.StartUpload/CancelUpload/ListTransfers/GetTransfer 使用。
 // 单例（app.New 时构造一次），与 App 同寿命。
+//
+// v0.6.0 起：Manager 同时承载 upload + download（共享 jobs map），
+// 方向由 JobInfo.Direction 区分；DownloadManager 是同一指针的别名。
 func (a *App) UploadManager() *transfer.Manager {
+	return a.uploadMgr
+}
+
+// DownloadManager 返回 v0.6.0 streaming download manager。
+//
+// 与 UploadManager 是同一实例（共享 jobs map / 事件总线 / 进度机制）；
+// 保留独立 getter 是为前端调用语义清晰。底层不重复实现。
+func (a *App) DownloadManager() *transfer.Manager {
 	return a.uploadMgr
 }
 

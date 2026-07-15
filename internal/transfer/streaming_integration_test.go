@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -496,6 +497,258 @@ func TestUpload_Integration_Resume(t *testing.T) {
 	_ = cli2.Close()
 
 	got := readRemoteFile(t, server, remotePath)
+	if !bytes.Equal(got, srcData) {
+		t.Errorf("after resume: content mismatch")
+	}
+	gh := sha256.Sum256(got)
+	sh := sha256.Sum256(srcData)
+	if hex.EncodeToString(gh[:]) != hex.EncodeToString(sh[:]) {
+		t.Errorf("SHA-256 mismatch after resume")
+	}
+}
+
+// -----------------------------------------------------------------------------
+// v0.6.0 Download 集成测试
+// -----------------------------------------------------------------------------
+//
+// 与 upload 集成测试同结构：复用 streamingSFTPTestServer +
+// newSFTPClientForTest。差异：
+//   - 先用普通方式"上传"（sftpclient.Client.Write）把数据写到远端
+//   - 然后用 transfer.Download 拉回本地 → 字节级比对
+//   - 关原 client + dial 新 client 避免读写抢同一 SFTP channel
+//
+// 不开 100MB 下载测试（与 upload 50MB 同档位；download 100MB 主要
+// 测的是 network/IO 而不是 streaming 逻辑）。
+
+// seedRemote 写"远端"文件内容。
+//
+// v0.6.0 集成测试用：直接走 cli.Write（不走 transfer.Upload）；
+// download 测试需要先有远端数据。
+func seedRemoteData(t *testing.T, cli *sftpclient.Client, path string, data []byte) {
+	t.Helper()
+	if _, err := cli.Write(path, data); err != nil {
+		t.Fatalf("seed remote: %v", err)
+	}
+}
+
+// TestDownload_Integration_SFTPSmoke 最小化下载端到端：1 MiB 远端数据
+// → 本地 → 字节级比对 + SHA-256 验证。
+func TestDownload_Integration_SFTPSmoke(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip in short mode")
+	}
+	const size = 1 * 1024 * 1024 // 1 MiB
+
+	server := newStreamingSFTPTestServer(t)
+	cli := newSFTPClientForTest(t, server)
+	manifestDir := t.TempDir()
+
+	// seed 远端
+	srcData := make([]byte, size)
+	if _, err := rand.Read(srcData); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	remotePath := "/dl-smoke.bin"
+	seedRemoteData(t, cli, remotePath, srcData)
+	// 关 client 让 server 端 SFTP RequestServer 退出（避免在 download 新 client 时死锁）
+	_ = cli.Close()
+
+	// 用新 client 下载
+	cli2 := newSFTPClientForTest(t, server)
+	localPath := t.TempDir() + "/dl-smoke.bin"
+	req := DownloadRequest{
+		TransferID:  "tx-d-smoke",
+		RemotePath:  remotePath,
+		LocalPath:   localPath,
+		ChunkSize:   1 * 1024 * 1024,
+		Concurrency: 2,
+	}
+	if err := Download(context.Background(), cli2, req, manifestDir, nil); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	_ = cli2.Close()
+
+	got, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if len(got) != size {
+		t.Errorf("size: got %d, want %d", len(got), size)
+	}
+	if !bytes.Equal(got, srcData) {
+		t.Errorf("content mismatch")
+	}
+	gh := sha256.Sum256(got)
+	sh := sha256.Sum256(srcData)
+	if hex.EncodeToString(gh[:]) != hex.EncodeToString(sh[:]) {
+		t.Errorf("SHA-256 mismatch")
+	}
+
+	// 成功完成后 manifest 应被删除
+	if _, err := LoadManifest(manifestDir, "tx-d-smoke"); !errors.Is(err, ErrManifestNotFound) {
+		t.Errorf("manifest after success: got err=%v, want ErrManifestNotFound", err)
+	}
+}
+
+// TestDownload_Integration_50MB 跑 50 MiB（与 upload 50MB 同档位）。
+func TestDownload_Integration_50MB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip 50MB in short mode")
+	}
+	const size = 50 * 1024 * 1024
+
+	server := newStreamingSFTPTestServer(t)
+	cli := newSFTPClientForTest(t, server)
+	manifestDir := t.TempDir()
+
+	srcData := make([]byte, size)
+	if _, err := rand.Read(srcData); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	remotePath := "/dl-big50.bin"
+	seedRemoteData(t, cli, remotePath, srcData)
+	_ = cli.Close()
+
+	cli2 := newSFTPClientForTest(t, server)
+	localPath := t.TempDir() + "/dl-big50.bin"
+	req := DownloadRequest{
+		TransferID:  "tx-d-50mb",
+		RemotePath:  remotePath,
+		LocalPath:   localPath,
+		ChunkSize:   4 * 1024 * 1024,
+		Concurrency: 2,
+	}
+	if err := Download(context.Background(), cli2, req, manifestDir, nil); err != nil {
+		t.Fatalf("Download 50MB: %v", err)
+	}
+	_ = cli2.Close()
+
+	got, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if len(got) != size {
+		t.Errorf("size: got %d, want %d", len(got), size)
+	}
+	if !bytes.Equal(got, srcData) {
+		t.Errorf("content mismatch (50MB)")
+	}
+	gh := sha256.Sum256(got)
+	sh := sha256.Sum256(srcData)
+	if hex.EncodeToString(gh[:]) != hex.EncodeToString(sh[:]) {
+		t.Errorf("SHA-256 mismatch (50MB)")
+	}
+}
+
+// TestDownload_Integration_ConcurrentOrdering 验证并发 ReadAt 各读
+// 自己 offset 区间（不重叠），最终字节哈希等于源文件。
+func TestDownload_Integration_ConcurrentOrdering(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip in short mode")
+	}
+	const size = 8 * 1024 * 1024
+
+	server := newStreamingSFTPTestServer(t)
+	cli := newSFTPClientForTest(t, server)
+	manifestDir := t.TempDir()
+
+	srcData := make([]byte, size)
+	if _, err := rand.Read(srcData); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	remotePath := "/dl-concurrent.bin"
+	seedRemoteData(t, cli, remotePath, srcData)
+	_ = cli.Close()
+
+	cli2 := newSFTPClientForTest(t, server)
+	localPath := t.TempDir() + "/dl-concurrent.bin"
+	req := DownloadRequest{
+		TransferID:  "tx-d-conc",
+		RemotePath:  remotePath,
+		LocalPath:   localPath,
+		ChunkSize:   1 * 1024 * 1024,
+		Concurrency: 4, // 4 路并发
+	}
+	if err := Download(context.Background(), cli2, req, manifestDir, nil); err != nil {
+		t.Fatalf("Download concurrent: %v", err)
+	}
+	_ = cli2.Close()
+
+	got, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !bytes.Equal(got, srcData) {
+		t.Fatalf("concurrent ReadAt produced wrong content")
+	}
+}
+
+// TestDownload_Integration_Resume 中断后 resume 续传验证最终字节完整。
+func TestDownload_Integration_Resume(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip in short mode")
+	}
+	const size = 32 * 1024 * 1024
+
+	server := newStreamingSFTPTestServer(t)
+	cli := newSFTPClientForTest(t, server)
+	manifestDir := t.TempDir()
+
+	srcData := make([]byte, size)
+	if _, err := rand.Read(srcData); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	remotePath := "/dl-resume.bin"
+	seedRemoteData(t, cli, remotePath, srcData)
+	_ = cli.Close()
+
+	localPath := t.TempDir() + "/dl-resume.bin"
+	// 第一次：1ms 后 cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(1 * time.Millisecond)
+		cancel()
+	}()
+	cli2 := newSFTPClientForTest(t, server)
+	req := DownloadRequest{
+		TransferID:  "tx-d-resume",
+		RemotePath:  remotePath,
+		LocalPath:   localPath,
+		ChunkSize:   4 * 1024 * 1024,
+		Concurrency: 2,
+	}
+	_ = Download(ctx, cli2, req, manifestDir, nil)
+	_ = cli2.Close()
+
+	m, err := LoadManifest(manifestDir, "tx-d-resume")
+	if err != nil || m == nil || len(m.UploadedChunks) == 0 {
+		chunks := -1
+		if m != nil {
+			chunks = len(m.UploadedChunks)
+		}
+		t.Skipf("cancel too early no manifest resume point (err=%v, chunks=%d)", err, chunks)
+	}
+	t.Logf("partial download: %d chunks done, resuming", len(m.UploadedChunks))
+
+	// 重新开 client + resume
+	cli3 := newSFTPClientForTest(t, server)
+	req2 := DownloadRequest{
+		TransferID:  "tx-d-resume",
+		RemotePath:  remotePath,
+		LocalPath:   localPath,
+		ChunkSize:   4 * 1024 * 1024,
+		Concurrency: 2,
+		Resume:      true,
+	}
+	if dlErr := Download(context.Background(), cli3, req2, manifestDir, nil); dlErr != nil {
+		t.Fatalf("Resume Download: %v", dlErr)
+	}
+	_ = cli3.Close()
+
+	got, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
 	if !bytes.Equal(got, srcData) {
 		t.Errorf("after resume: content mismatch")
 	}

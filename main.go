@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -36,7 +37,10 @@ import (
 	"github.com/mossterm/mossterm/internal/secret"
 	"github.com/mossterm/mossterm/internal/session"
 	"github.com/mossterm/mossterm/internal/sshclient"
+	"github.com/mossterm/mossterm/internal/tunnel"
 	"github.com/mossterm/mossterm/internal/ui/wailsbindings"
+
+	"golang.org/x/crypto/ssh"
 )
 
 //go:embed frontend/dist
@@ -139,11 +143,23 @@ func run(flags *cliFlags, logger *slog.Logger) error {
 	}
 	logger.Info("known_hosts ready", "path", knownHostsPath, "entries", kh.Size(), "trust", "gui")
 
-	// 3. 跳板策略 registry
+	// 3. 跳板策略 registry（v0.6 接入 multi-hop）
 	//
-	// v0.1：空注册表。session.Manager 在 v0.1 走 connect.Connector
-	// 不走 agent.Build；agent 在 v0.5 接入 multi-hop 时再注入 "direct" 策略。
+	// v0.1：空注册表；v0.6：注册 "direct" + "single-jump" + "multi-hop"
+	// 三个策略到 app.WireDefaultAgentStrategies。SSHDialer 把 connect.Deps
+	// 包装成 agent.Dialer，给跳板链中每跳用。
 	ag := agent.NewMemoryRegistry()
+	dialerDeps := connect.Deps{
+		DialTimeout: 15 * time.Second,
+		KeepAlive:   30 * time.Second,
+		HostKeyCb:   kh.HostKeyCallback(), // known_hosts 校验 host key
+		Secrets:     sec,                  // publickey auth 时拉私钥
+	}
+	// 复用同一组 connect.Deps 给跳板 dialer
+	sshDialer := app.NewSSHDialer(dialerDeps)
+	if err := app.WireDefaultAgentStrategies(ag, sshDialer); err != nil {
+		return fmt.Errorf("wire agent strategies: %w", err)
+	}
 	logger.Info("agent registry ready", "schemes", ag.Schemes())
 
 	// 4. 协议 connector registry
@@ -166,11 +182,33 @@ func run(flags *cliFlags, logger *slog.Logger) error {
 		WithSecrets(sec).
 		WithKnownHosts(kh)
 
+	// 5.5 端口转发 manager（v0.6 接入 Local/Remote/Dynamic 三种转发）
+	//
+	// tunnel 不直接依赖 session 包（避免循环），通过 ClientProvider 接口
+	// 反查 sessionID → *ssh.Client：先 sess.Connector() 拿 connect.Connector，
+	// 再 type assert 回 *sshclient.Connector 调 RawClient()。
+	tunMgr := tunnel.NewMemoryManager().WithClientProvider(tunnel.ClientFunc(
+		func(sessionID string) (*ssh.Client, bool) {
+			sess, ok := mm.Get(session.ID(sessionID))
+			if !ok {
+				return nil, false
+			}
+			conn, ok := sess.Connector().(*sshclient.Connector)
+			if !ok {
+				return nil, false
+			}
+			c := conn.RawClient()
+			return c, c != nil
+		},
+	))
+	logger.Info("tunnel manager ready", "modes", []string{"local", "remote", "dynamic"})
+
 	// 6. 装配 app
 	core := app.New(app.Deps{
 		Cfg:        cfg,
 		Secret:     sec,
 		Sessions:   mm,
+		Tunnels:    tunMgr, // v0.6 端口转发（Local/Remote/Dynamic）
 		Agents:     ag,
 		KnownHosts: kh, // v0.5.0：供 wailsbindings.TrustHost 调 ReplyTrust
 		Connectors: reg,

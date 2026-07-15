@@ -1,96 +1,52 @@
 // auth.go 把 connect.AuthMethod（sum-type）转换为 ssh.AuthMethod 列表。
 //
-// 每种 connect.AuthMethod 对应一个 / 多个 ssh.AuthMethod 实现：
-//   - PasswordAuth            → ssh.Password
-//   - PublicKeyAuth           → ssh.PublicKeys (使用外部注入的 Signer，或从 secret.Store 拉 KeyID)
-//   - AgentAuth               → ssh.PublicKeysCallback (走本地 ssh-agent)
-//   - KeyboardInteractiveAuth → ssh.KeyboardInteractive (v0.1 仅占位)
+// v0.6 起转换逻辑下移到 connect.ToSSHAuthMethods，本文件变成薄包装：
+//   - c.loadSigner 解析 publickey 私钥并缓存（per-KeyID LRU）
+//   - c.authMethods 调 connect.ToSSHAuthMethods + 注入缓存好的 Signer
+//
+// 缓存目的：避免每次 Dial 都重新打开 secret.Store + 解析 PEM。
+// 注：loadSigner 仍保留 sshclient 私有（依赖 c.signerCache LRU）；
+// agent 包的 Dialer 走自己的路径（不享 LRU；按需调 secret.Store 即可）。
 package sshclient
 
 import (
 	"errors"
 	"fmt"
-	"net"
-	"os"
 
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/mossterm/mossterm/internal/connect"
 )
 
 // authMethods 把 connect.AuthMethod 转换为 ssh 库所需的 []ssh.AuthMethod。
 //
-// 作为 Connector 的方法，publickey 路径可以在需要时通过 c.loadSigner
-// 从 secret.Store 拉私钥解析 signer。
+// 流程：
+//  1. 如果是 PublicKeyAuth{KeyID, ...}：先 c.loadSigner 走 LRU，
+//     命中直接用；miss 时从 secret.Store 拉私钥 bytes → 解析 → 写 LRU
+//  2. 把解析好的 Signer 注入 PublicKeyAuth{Signer}，交给 connect.ToSSHAuthMethods
+//  3. 返回 []ssh.AuthMethod
 //
-// 该方法不持有网络/IO 状态：每次调用都会重新解析（agent 情况除外 ——
-// agent 每次回调都会重新连接 $SSH_AUTH_SOCK）。signerCache 提供 per-KeyID
-// 缓存，避免重复解析。
+// 为什么不让 connect.ToSSHAuthMethods 直接拿 secrets？
+//   - sshclient 有 per-KeyID LRU 缓存，命中时省一次 secret.Store IO + PEM 解析
+//   - agent 包的 Dialer 不需要这个缓存（hop 数量少 + 一次性）
+//   - 两套入口并行：sshclient 走 LRU，agent 走 secret.Store 直拉
 func (c *Connector) authMethods(am connect.AuthMethod) ([]ssh.AuthMethod, error) {
 	if am == nil {
 		return nil, errors.New("sshclient.authMethods: nil auth method")
 	}
-	switch a := am.(type) {
-	case connect.PasswordAuth:
-		return []ssh.AuthMethod{ssh.Password(string(a))}, nil
-
-	case connect.PublicKeyAuth:
-		// 两种使用方式：
-		//   1. Signer != nil —— 调用方已解析好，直接用
-		//   2. KeyID != "" —— 从 secret.Store 拉私钥后解析
-		signer := a.Signer
-		if signer == nil {
-			if a.KeyID == "" {
-				return nil, errors.New("sshclient.authMethods: PublicKeyAuth: both Signer and KeyID are empty")
-			}
-			loaded, err := c.loadSigner(a.KeyID, a.Passphrase)
-			if err != nil {
-				return nil, fmt.Errorf("sshclient.authMethods: load signer for keyID=%q: %w", a.KeyID, err)
-			}
-			signer = loaded
+	// publickey 走 LRU 预热 signer，再交给 connect.ToSSHAuthMethods
+	if pka, ok := am.(connect.PublicKeyAuth); ok && pka.Signer == nil && pka.KeyID != "" {
+		loaded, err := c.loadSigner(pka.KeyID, pka.Passphrase)
+		if err != nil {
+			return nil, fmt.Errorf("sshclient.authMethods: load signer for keyID=%q: %w", pka.KeyID, err)
 		}
-		methods := []ssh.AuthMethod{ssh.PublicKeys(signer)}
-		// 如果带 passphrase，可补充 keyboard-interactive 作为兜底
-		// (某些服务器在公钥失败时会回退询问口令)
-		if a.Passphrase != "" {
-			methods = append(methods, ssh.KeyboardInteractive(keyboardInteractiveChallenge))
+		am = connect.PublicKeyAuth{
+			Signer:     loaded,
+			KeyID:      pka.KeyID,
+			Passphrase: pka.Passphrase,
 		}
-		return methods, nil
-
-	case connect.AgentAuth:
-		return []ssh.AuthMethod{
-			ssh.PublicKeysCallback(agentSignersCallback),
-		}, nil
-
-	case connect.KeyboardInteractiveAuth:
-		return []ssh.AuthMethod{
-			ssh.KeyboardInteractive(keyboardInteractiveChallenge),
-		}, nil
-
-	default:
-		return nil, fmt.Errorf("sshclient.authMethods: unknown auth method type %T", am)
 	}
-}
-
-// agentSignersCallback 是 ssh.PublicKeysCallback 的实现。
-//
-// v0.1 简化：每次 SSH 协议层请求 Signer 时，都重新连接 $SSH_AUTH_SOCK。
-// 这样可以正确处理 agent 端新增 / 删除 key 的情况，但每次连接握手
-// 会多一次 unix socket 往返。生产环境可改为长连接 + 缓存。
-func agentSignersCallback() ([]ssh.Signer, error) {
-	sock := os.Getenv("SSH_AUTH_SOCK")
-	if sock == "" {
-		return nil, errors.New("sshclient: SSH_AUTH_SOCK not set")
-	}
-	conn, err := net.Dial("unix", sock)
-	if err != nil {
-		return nil, fmt.Errorf("sshclient: dial agent socket %q: %w", sock, err)
-	}
-	defer conn.Close()
-
-	ag := agent.NewClient(conn)
-	return ag.Signers()
+	return connect.ToSSHAuthMethods(am, c.secrets)
 }
 
 // keyboardInteractiveChallenge 是 ssh.KeyboardInteractive 的默认 challenge 处理。
@@ -101,9 +57,12 @@ func agentSignersCallback() ([]ssh.Signer, error) {
 //
 // 真实实现需要在 user / instruction / questions 之间建立映射并通过 UI
 // 提示用户输入；v0.1 暂未提供 UI 通道。
+//
+// 仍然保留本函数以维持旧调用方（v0.1-v0.5 期间的 ssh.KeyboardInteractive
+// 引用），但 v0.6 起的 connect.ToSSHAuthMethods 已经改用包内私有的
+// sshKeyboardInteractiveStub；本函数已不在生产路径上。
+// 保留它便于未来扩展（比如接 Wails prompt 通道时在这里改）。
 func keyboardInteractiveChallenge(user, instruction string, questions []string, echos []bool) ([]string, error) {
-	// TODO(secret): 接通 secret.Store 拉取密码 / 私钥 passphrase
-	// TODO(ui): 接通 Wails 事件总线把 prompt 推给前端
 	_ = user
 	_ = instruction
 	_ = echos

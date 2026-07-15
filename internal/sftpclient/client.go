@@ -409,8 +409,11 @@ type ListPage struct {
 // v0.5.10 扩展加 io.WriterAt：streaming upload 走 WriteAt 并发分片
 // （pkg/sftp 的 *sftp.File 已实现 WriteAt）。扩展不破坏既有 caller
 // （SftpRead/Write/UploadFile 只用 Reader/Writer/Closer）。
+// v0.6.0 扩展加 io.ReaderAt：streaming download 走 ReadAt 并发分片
+// （*sftp.File 同样实现 ReadAt，O_RDONLY 模式可用）。同理不破坏既有 caller。
 type ReadWriteCloser interface {
 	io.Reader
+	io.ReaderAt
 	io.Writer
 	io.WriterAt
 	io.Closer

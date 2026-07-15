@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mossterm/mossterm/internal/agent"
 	"github.com/mossterm/mossterm/internal/connect"
 	"github.com/mossterm/mossterm/internal/sshclient"
 )
@@ -35,6 +36,48 @@ func WireDefaultConnectors(r connect.Registry) error {
 	}
 
 	// 未来：r.Register("telnet", telnetFactory) 等
+	return nil
+}
+
+// WireDefaultAgentStrategies 把 MossTerm v0.6 起的跳板策略注册到 r。
+//
+// 注册的策略：
+//   - "direct"     —— 一跳直连
+//   - "single-jump" —— Local ← Hop1 ← Target
+//   - "multi-hop"  —— 任意跳数（v0.6 spec 显式列出）
+//
+// dialer 是 agent.Dialer（典型为 *app.SSHDialer），由调用方提供。
+// dialer == nil 时所有三个策略都注册（direct 不强制要求 dialer 也
+// 能注册，Build 时由 BuildOptions.Dialer 兜底；调用方应负责注入）。
+//
+// 注册冲突（策略名已被注册）会被忽略 —— 与 WireDefaultConnectors 语义对齐。
+func WireDefaultAgentStrategies(r agent.Registry, dialer agent.Dialer) error {
+	if r == nil {
+		return fmt.Errorf("app.WireDefaultAgentStrategies: nil registry")
+	}
+
+	// "direct" 不强制要求 dialer（BuildFunc 内部校验 BuildOptions.Dialer）
+	if err := r.Register(agent.StrategyDirect, agent.DirectBuildFunc); err != nil {
+		if !isAlreadyRegisteredErr(err) {
+			return fmt.Errorf("app.WireDefaultAgentStrategies: register %q: %w", agent.StrategyDirect, err)
+		}
+	}
+
+	// "single-jump" / "multi-hop" 内部都要求 dialer，nil 时跳过注册
+	// （允许业务方后续再 Register；不会因为缺 dialer 让整个 wire 失败）
+	if dialer != nil {
+		if err := r.Register(agent.StrategySingleJump, agent.SingleJumpBuildFunc); err != nil {
+			if !isAlreadyRegisteredErr(err) {
+				return fmt.Errorf("app.WireDefaultAgentStrategies: register %q: %w", agent.StrategySingleJump, err)
+			}
+		}
+		if err := r.Register(agent.StrategyMultiHop, agent.MultiHopBuildFunc); err != nil {
+			if !isAlreadyRegisteredErr(err) {
+				return fmt.Errorf("app.WireDefaultAgentStrategies: register %q: %w", agent.StrategyMultiHop, err)
+			}
+		}
+	}
+
 	return nil
 }
 

@@ -1,7 +1,7 @@
 /**
- * Transfer store（v0.5.10 streaming upload）
+ * Transfer store（v0.5.10 streaming upload + v0.6.0 streaming download）
  * --------------------------------------------------------------------
- * 集中管理 streaming upload 的任务状态 + 进度。
+ * 集中管理 streaming upload / download 的任务状态 + 进度。
  *
  * 数据来源（两条路）：
  *   1. 主动调用：refreshList（拉后端 list）/ upsertJob（接 transfer:done
@@ -13,12 +13,13 @@
  *   - 完成后保留在 map 里，UI 用 listActive / listFinished 区分
  *   - progress 事件节流 200ms 是后端做的；前端只负责 upsert
  *   - 不持久化：刷新页面清空（后端 Manager 也在内存）；前端 store 仅缓存
- *   - 不调 App.StartUpload：sessionID 在调用方上下文已知，由组件直接调
- *     binding；本 store 只做"事件 → state 投影"
+ *   - 不调 App.StartUpload / App.StartDownload：sessionID 在调用方上下文
+ *     已知，由组件直接调 binding；本 store 只做"事件 → state 投影"
  *
  * 复用：
  *   - SftpBrowserContent drag handler 调 App.StartUpload → upsertJob
- *   - UploadProgress 组件订阅 useTransferEvents → applyProgress / upsertJob
+ *   - SftpBrowserContent (v0.6+) "Download" 按钮调 App.StartDownload → upsertJob
+ *   - TransferProgress 组件订阅 useTransferEvents → applyProgress / upsertJob
  *   - 全局：useTransferStore.getState() 直接读
  */
 import { create } from "zustand";
@@ -28,7 +29,7 @@ import { logger } from "@utils/logger";
 
 /** JobView = 持久 JobInfo（最新一次 emit 的快照）。 */
 export type JobView = UploadJobInfo & {
-  /** 最近一次 progress 事件的速度 B/s（用于 UploadProgress 行内显示） */
+  /** 最近一次 progress 事件的速度 B/s（用于 TransferProgress 行内显示） */
   speedBps?: number;
   /** 最近一次 progress 事件的 ETA 秒（-1 = 未知） */
   etaSec?: number;
@@ -38,7 +39,7 @@ export interface TransferState {
   // ===== state =====
   /** 按 transferID 索引的 jobs */
   jobs: Record<string, JobView>;
-  /** 选中态（UploadProgress 面板的"当前展示哪一个"） */
+  /** 选中态（TransferProgress 面板的"当前展示哪一个"） */
   selectedID: string | null;
   /** 错误兜底（refreshList / cancel 失败时给 UI） */
   lastError: string | null;
@@ -50,8 +51,10 @@ export interface TransferState {
   listFinished: () => JobView[];
 
   // ===== actions =====
-  /** 取消一个 transfer（调 App.CancelUpload）。 */
+  /** 取消一个 upload transfer（调 App.CancelUpload）。 */
   cancelUpload: (id: string) => Promise<void>;
+  /** 取消一个 download transfer（调 App.CancelDownload）。 */
+  cancelDownload: (id: string) => Promise<void>;
   /** 从后端拉一次最新 list（事件丢失兜底）。 */
   refreshList: () => Promise<void>;
   /** 内部使用：被 useTransferEvents() 钩子调用同步 JobInfo。 */
@@ -68,11 +71,23 @@ export interface TransferState {
  *
  * v0.5.10 Wails 序列化按 Go struct 字段原 tag（camelCase），
  * 所以 transform 通常是 no-op。保留 transform 函数便于未来字段命名约定变化。
+ *
+ * v0.6.0 扩展：direction 字段。Go enum int 序列化为 number
+ * （0=upload, 1=download）；Wails 反射按 Go json tag 输出 int，
+ * 规范化为字符串 "upload" / "download" 方便前端消费。
  */
 function normalizeJobInfo(raw: unknown): JobView {
   const r = raw as Record<string, unknown>;
+  // direction 兼容 int（0/1）和 string（"upload"/"download"）
+  let direction: "upload" | "download" = "upload";
+  if (typeof r.direction === "string") {
+    direction = r.direction === "download" ? "download" : "upload";
+  } else if (typeof r.direction === "number") {
+    direction = r.direction === 1 ? "download" : "upload";
+  }
   return {
     transferID:  String(r.transferID ?? r.transfer_id ?? ""),
+    direction,
     localPath:   String(r.localPath  ?? r.local_path  ?? ""),
     remotePath:  String(r.remotePath ?? r.remote_path ?? ""),
     totalBytes:  Number(r.totalBytes  ?? r.total_bytes  ?? 0),
@@ -122,6 +137,17 @@ export const useTransferStore = create<TransferState>((set, get) => ({
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error(`[transferStore] cancelUpload ${id}: ${msg}`);
+      set({ lastError: msg });
+    }
+  },
+
+  cancelDownload: async (id) => {
+    set({ lastError: null });
+    try {
+      await App.CancelDownload(id);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[transferStore] cancelDownload ${id}: ${msg}`);
       set({ lastError: msg });
     }
   },
