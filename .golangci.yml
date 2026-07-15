@@ -1,6 +1,8 @@
 # MossTerm golangci-lint 配置
 # 文档: https://golangci-lint.run/usage/configuration/
 
+version: "2"
+
 run:
   # 超时（CI 上可适当放宽）
   timeout: 5m
@@ -16,7 +18,7 @@ run:
 
 output:
   formats:
-    - format: colored-line-number
+    colored-line-number:
       path: stdout
   print-issued-lines: true
   print-linter-name: true
@@ -27,15 +29,12 @@ linters:
   enable:
     # —— 基础 ——
     - errcheck      # 检查未处理的 error
-    - gosimple      # 简化代码
     - govet         # 官方 go vet
     - ineffassign   # 检测无效赋值
-    - staticcheck   # 静态分析（集大成者）
+    - staticcheck   # 静态分析（集大成者，含 gosimple）
     - unused        # 未使用的标识符
 
     # —— 风格 ——
-    - gofmt         # 格式
-    - goimports     # import 分组与排序
     - misspell      # 英文拼写
     - gocritic      # 代码味道
     - revive        # golint 替代
