@@ -218,8 +218,9 @@ jobs:
       - name: 安装 Linux 桌面依赖 (gtk3 + webkit)
         if: runner.os == 'Linux'
         run: |
+          # Ubuntu 24.04 (noble) 已经移除 webkit2gtk-4.0，wails v2.12 走 4.1
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev pkg-config build-essential
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config build-essential
 
       - name: 安装 Wails CLI
         run: |
@@ -237,6 +238,7 @@ jobs:
 
       - name: 计算构建元数据
         id: meta
+        shell: bash
         run: |
           # tag 是 v* 时用 ref_name，否则用 git describe 兜底
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
@@ -249,9 +251,11 @@ jobs:
           echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: wails build (${{ matrix.platform }})
+        shell: bash
         run: |
-          mkdir -p dist
-          # 拼接 ldflags —— 与 Makefile 保持一致
+          # wails 默认输出 build/bin/：
+          #   darwin: mossterm.app/ 目录
+          #   linux/windows: mossterm 或 mossterm.exe
           LDFLAGS="-s -w \
             -X '${{ env.PKG_PATH }}/internal/app.Version=${{ steps.meta.outputs.version }}' \
             -X '${{ env.PKG_PATH }}/internal/app.Commit=${{ steps.meta.outputs.commit }}' \
@@ -259,16 +263,29 @@ jobs:
           wails build \
             -platform ${{ matrix.platform }} \
             -trimpath \
-            -ldflags "$LDFLAGS" \
-            -o "dist/${{ matrix.bin }}"
+            -ldflags "$LDFLAGS"
+          # 把 wails 输出搬到 dist/，统一命名
+          mkdir -p dist
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            cp -R "build/bin/mossterm.app" "dist/mossterm.app"
+          else
+            cp "build/bin/${{ matrix.bin }}" "dist/${{ matrix.bin }}"
+          fi
 
       - name: 打包归档
+        shell: bash
         run: |
           cd dist
-          if [ "${{ matrix.archive }}" = "tar.gz" ]; then
-            tar -czf "mossterm-${{ matrix.platform }}.tar.gz" "${{ matrix.bin }}"
+          # macOS 产物是 .app 目录（dist/mossterm.app），其他平台是单个可执行文件
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            PAYLOAD="mossterm.app"
           else
-            powershell -NoProfile -Command "Compress-Archive -Path '${{ matrix.bin }}' -DestinationPath 'mossterm-${{ matrix.platform }}.zip'"
+            PAYLOAD="${{ matrix.bin }}"
+          fi
+          if [ "${{ matrix.archive }}" = "tar.gz" ]; then
+            tar -czf "mossterm-${{ matrix.platform }}.tar.gz" "$PAYLOAD"
+          else
+            powershell -NoProfile -Command "Compress-Archive -Path '$PAYLOAD' -DestinationPath 'mossterm-${{ matrix.platform }}.zip'"
           fi
         shell: bash
 
@@ -278,5 +295,6 @@ jobs:
           name: mossterm-${{ matrix.platform }}
           path: |
             dist/${{ matrix.bin }}
+            dist/mossterm.app
             dist/mossterm-${{ matrix.platform }}.*
           if-no-files-found: error

@@ -121,8 +121,11 @@ jobs:
           echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: wails build (${{ matrix.platform }})
+        shell: bash
         run: |
-          mkdir -p dist
+          # wails 默认输出 build/bin/：
+          #   darwin: mossterm.app/ 目录
+          #   linux/windows: mossterm 或 mossterm.exe
           LDFLAGS="-s -w \
             -X '${{ env.PKG_PATH }}/internal/app.Version=${{ steps.version.outputs.tag }}' \
             -X '${{ env.PKG_PATH }}/internal/app.Commit=${{ steps.version.outputs.commit }}' \
@@ -130,18 +133,30 @@ jobs:
           wails build \
             -platform ${{ matrix.platform }} \
             -trimpath \
-            -ldflags "$LDFLAGS" \
-            -o "dist/${{ matrix.bin }}"
+            -ldflags "$LDFLAGS"
+          # 把 wails 输出搬到 dist/，统一命名
+          mkdir -p dist
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            cp -R "build/bin/mossterm.app" "dist/mossterm.app"
+          else
+            cp "build/bin/${{ matrix.bin }}" "dist/${{ matrix.bin }}"
+          fi
 
       - name: 打包归档
+        shell: bash
         run: |
           cd dist
-          if [ "${{ matrix.archive }}" = "tar.gz" ]; then
-            tar -czf "mossterm-${{ matrix.platform }}.tar.gz" "${{ matrix.bin }}"
+          # macOS 产物是 .app 目录（dist/mossterm.app），其他平台是单个可执行文件
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            PAYLOAD="mossterm.app"
           else
-            powershell -NoProfile -Command "Compress-Archive -Path '${{ matrix.bin }}' -DestinationPath 'mossterm-${{ matrix.platform }}.zip'"
+            PAYLOAD="${{ matrix.bin }}"
           fi
-        shell: bash
+          if [ "${{ matrix.archive }}" = "tar.gz" ]; then
+            tar -czf "mossterm-${{ matrix.platform }}.tar.gz" "$PAYLOAD"
+          else
+            powershell -NoProfile -Command "Compress-Archive -Path '$PAYLOAD' -DestinationPath 'mossterm-${{ matrix.platform }}.zip'"
+          fi
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
@@ -149,6 +164,7 @@ jobs:
           name: mossterm-${{ matrix.platform }}
           path: |
             dist/${{ matrix.bin }}
+            dist/mossterm.app
             dist/mossterm-${{ matrix.platform }}.*
           if-no-files-found: error
 
