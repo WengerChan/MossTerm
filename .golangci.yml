@@ -20,7 +20,6 @@ output:
       path: stdout
   print-issued-lines: true
   print-linter-name: true
-  uniq-by-line: true
 
 linters:
   disable-all: true
@@ -55,7 +54,6 @@ linters:
     - dupl          # 重复代码块
 
     # —— 安全（基础，深度检查交给 gosec） ——
-    - exportloopref # 循环变量捕获（Go 1.22+ 已不再需要，可注释）
     - durationcheck # time.Duration 算术误用
     - copyloopvar   # 循环变量复制（Go 1.22+）
 
@@ -79,7 +77,6 @@ linters-settings:
     disabled-checks:
       - dupImport # goimports 已处理
       - ifElseChain
-      - tooManyParameters
   govet:
     enable-all: true
     disable:
@@ -117,6 +114,7 @@ issues:
   # 同一行多个问题一起报
   max-issues-per-linter: 0
   max-same-issues: 0
+  uniq-by-line: true
   # 新代码零警告：CI 会在 PR 上跑
   new-from-rev: origin/main
   new: true
