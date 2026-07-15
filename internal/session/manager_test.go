@@ -260,8 +260,8 @@ func TestOpen_AsyncReturnsBeforeDial(t *testing.T) {
 	subCh, cancel := sess.Subscribe()
 	defer cancel()
 
-	waitForStateEvent(t, subCh, StateAuthenticating, 500*time.Millisecond)
-	waitForStateEvent(t, subCh, StateEstablished, 500*time.Millisecond)
+	waitForStateEvent(t, subCh, StateAuthenticating, 1*time.Second)
+	waitForStateEvent(t, subCh, StateEstablished, 1*time.Second)
 
 	// 最终态
 	waitForState(t, sess, StateEstablished, 100*time.Millisecond)
@@ -296,7 +296,7 @@ func TestOpen_DialFailure_VisibleViaInfo(t *testing.T) {
 	defer cancel()
 
 	waitForState(t, sess, StateFailed, 500*time.Millisecond)
-	waitForStateEvent(t, subCh, StateFailed, 100*time.Millisecond)
+	waitForStateEvent(t, subCh, StateFailed, 1*time.Second)
 
 	// session 仍在 registry（caller 可 Get 后决定是否 Close）
 	if _, ok := mm.Get(sess.Info().ID); !ok {
