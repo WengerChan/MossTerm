@@ -1,5 +1,6 @@
 # MossTerm golangci-lint 配置
 # 文档: https://golangci-lint.run/usage/configuration/
+# v2 schema: https://golangci-lint.run/jsonschema/golangci.v2.10.jsonschema.json
 
 version: "2"
 
@@ -18,6 +19,7 @@ run:
 
 output:
   formats:
+    # 文本输出到 stdout（CI 默认）
     text:
       path: stdout
       print-issued-lines: true
@@ -26,7 +28,8 @@ output:
   show-stats: true
 
 linters:
-  disable-all: true
+  # v2 用 default: none（v1 叫 disable-all）—— 全部 linter 必须显式 enable
+  default: none
   enable:
     # —— 基础 ——
     - errcheck      # 检查未处理的 error
@@ -58,58 +61,80 @@ linters:
     - durationcheck # time.Duration 算术误用
     - copyloopvar   # 循环变量复制（Go 1.22+）
 
-  # 预设（用 presets 时下面 enable 列表仍然生效）
-  presets:
-    - bugs
-    - performance
-    - style
+  # v2 叫 settings（v1 叫 linters-settings）
+  settings:
+    gocyclo:
+      min-complexity: 15
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - dupImport # goimports 已处理
+        - ifElseChain
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment # 性能无关、可读性差
+    revive:
+      rules:
+        - name: var-naming
+        - name: package-comments
+        - name: indent-error-flow
+        - name: errorf
+        - name: error-strings
+        - name: dot-imports
+        - name: blank-imports
+        - name: context-as-argument
+        - name: early-return
+        - name: unused-parameter
+          arguments:
+            - allowRegex: "^_"
+    misspell:
+      locale: US
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+    staticcheck:
+      checks:
+        - all
+        - -SA1019 # 允许使用 deprecated API（迁移期常见），按需开启
+    gosec:
+      excludes:
+        - G107 # URL 拼接警告过多，必要时单独处理
 
-  # 快速反馈：先跑便宜的 linter
-  fast: false
-
-linters-settings:
-  gocyclo:
-    min-complexity: 15
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-    disabled-checks:
-      - dupImport # goimports 已处理
-      - ifElseChain
-  govet:
-    enable-all: true
-    disable:
-      - fieldalignment # 性能无关、可读性差
-  revive:
+  # v2 排除规则移到了 linters.exclusions.rules（v1 叫 issues.exclude-rules）
+  exclusions:
+    warn-unused: false
     rules:
-      - name: var-naming
-      - name: package-comments
-      - name: indent-error-flow
-      - name: errorf
-      - name: error-strings
-      - name: dot-imports
-      - name: blank-imports
-      - name: context-as-argument
-      - name: early-return
-      - name: unused-parameter
-        arguments:
-          - allowRegex: "^_"
-  misspell:
-    locale: US
-  goconst:
-    min-len: 3
-    min-occurrences: 3
-  goimports:
-    local-prefixes: github.com/mossterm/mossterm
-  staticcheck:
-    checks:
-      - all
-      - -SA1019 # 允许使用 deprecated API（迁移期常见），按需开启
-  gosec:
-    excludes:
-      - G107 # URL 拼接警告过多，必要时单独处理
+      # _test.go 文件：放松复杂度/重复类 linter
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - gocritic
+          - goconst
+          - dupl
+      # secret 包 G101 误报（凭据来自 keyring）
+      - path: internal/secret/
+        text: "G101"
+        linters:
+          - gosec
+      # frontend node_modules 完全不参与 lint
+      - path: ^frontend/
+        linters:
+          - all
+
+formatters:
+  # v2 把 gofmt / goimports 移到 formatters（不是 linter）
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      # v2 改成 array（v1 是 string）
+      local-prefixes:
+        - github.com/mossterm/mossterm
 
 issues:
   # 同一行多个问题一起报
@@ -119,17 +144,3 @@ issues:
   # 新代码零警告：CI 会在 PR 上跑
   new-from-rev: origin/main
   new: true
-  # 排除 vendor、自动生成、frontend
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - gocyclo
-        - gocritic
-        - goconst
-        - dupl
-    - path: internal/secret/
-      text: "G101" # 误报：硬编码凭据检测（凭据来自 keyring）
-    - path: ^frontend/
-      linters:
-        - all
-  exclude-use-default: false
