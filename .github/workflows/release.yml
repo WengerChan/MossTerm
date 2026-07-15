@@ -152,20 +152,22 @@ jobs:
           else
             PAYLOAD="${{ matrix.bin }}"
           fi
+          # matrix.platform 是 linux/amd64 这种带 / 的，把 / 换成 - 给 filename
+          PLATFORM_FLAT="${PLATFORM//\//-}"
           if [ "${{ matrix.archive }}" = "tar.gz" ]; then
-            tar -czf "mossterm-${{ matrix.platform }}.tar.gz" "$PAYLOAD"
+            tar -czf "mossterm-${PLATFORM_FLAT}.tar.gz" "$PAYLOAD"
           else
-            powershell -NoProfile -Command "Compress-Archive -Path '$PAYLOAD' -DestinationPath 'mossterm-${{ matrix.platform }}.zip'"
+            powershell -NoProfile -Command "Compress-Archive -Path '$PAYLOAD' -DestinationPath 'mossterm-${PLATFORM_FLAT}.zip'"
           fi
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: mossterm-${{ matrix.platform }}
+          name: mossterm-${{ matrix.platform | replace('/', '-') }}
           path: |
             dist/${{ matrix.bin }}
             dist/mossterm.app
-            dist/mossterm-${{ matrix.platform }}.*
+            dist/mossterm-${{ matrix.platform | replace('/', '-') }}.*
           if-no-files-found: error
 
   # ============================================================
@@ -197,6 +199,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: mossterm-*
           merge-multiple: true
 
       - name: 列出 dist 内容（调试）
