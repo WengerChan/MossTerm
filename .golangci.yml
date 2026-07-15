@@ -20,6 +20,7 @@ output:
       path: stdout
   print-issued-lines: true
   print-linter-name: true
+  show-stats: true
 
 linters:
   disable-all: true
@@ -132,4 +133,3 @@ issues:
       linters:
         - all
   exclude-use-default: false
-  show-stats: true
