@@ -179,16 +179,19 @@ jobs:
         include:
           - os: ubuntu-latest
             platform: linux/amd64
+            platform_clean: linux-amd64
             ext: ""
             archive: tar.gz
             bin: mossterm
           - os: macos-latest
             platform: darwin/universal
+            platform_clean: darwin-universal
             ext: ""
             archive: tar.gz
             bin: mossterm
           - os: windows-latest
             platform: windows/amd64
+            platform_clean: windows-amd64
             ext: ".exe"
             archive: zip
             bin: mossterm.exe
@@ -300,9 +303,9 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: mossterm-${{ matrix.platform | replace('/', '-') }}
+          name: mossterm-${{ matrix.platform_clean }}
           path: |
             dist/${{ matrix.bin }}
             dist/mossterm.app
-            dist/mossterm-${{ matrix.platform | replace('/', '-') }}.*
+            dist/mossterm-${{ matrix.platform_clean }}.*
           if-no-files-found: error
