@@ -127,11 +127,19 @@ func (t *localTunnel) handleConn(ctx context.Context, localConn net.Conn, sshCli
 
 	target := net.JoinHostPort(t.spec.TargetHost, fmt.Sprintf("%d", t.spec.TargetPort))
 
-	// 取消传播：ctx 取消时关 local conn（让 io.Copy 返回）
+	// 取消传播：ctx 取消时关 local conn（让 io.Copy 返回）。
+	//
+	// 注意：context.Background().Done() 返回 nil chan，<-nil chan 永远阻塞，
+	// 所以必须在 select 里同时监听 t.stopCh —— Stop 触发时也能回收这个 watcher。
+	// v0.6.1 修：之前用裸 if ctx != nil 启动 watcher，ctx==Background 时永久泄漏 goroutine。
 	if ctx != nil {
 		go func() {
-			<-ctx.Done()
-			_ = localConn.Close()
+			select {
+			case <-ctx.Done():
+				_ = localConn.Close()
+			case <-t.stopCh:
+				_ = localConn.Close()
+			}
 		}()
 	}
 

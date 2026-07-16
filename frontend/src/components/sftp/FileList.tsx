@@ -7,7 +7,6 @@ import { useEffect, useMemo } from "react";
 import { Folder, File, ChevronUp, ChevronDown } from "lucide-react";
 import clsx from "clsx";
 import { useSftpStore } from "./sftpStore";
-import { useUIStore } from "@stores/uiStore";
 import { formatBytes, formatAbsoluteTime } from "@utils/format";
 import type { SftpEntry as Entry } from "@/types/sftp";
 import type { SessionID } from "@/types/session";
@@ -15,17 +14,21 @@ import type { SessionID } from "@/types/session";
 export interface FileListProps {
   sessionId: SessionID;
   path: string;
+  /**
+   * 触发单文件下载。v0.6.1 新增：双击文件 / 顶部 Download 按钮 / 后续右键菜单
+   * 都走这个回调。调用方负责调 App.StartDownload + 写 useTransferStore.upsertJob。
+   */
+  onDownload?: (sessionId: SessionID, localPath: string, remotePath: string) => void;
 }
 
 type SortKey = "name" | "size" | "modTime";
 type SortDir = "asc" | "desc";
 
-export function FileList({ sessionId, path }: FileListProps): JSX.Element {
+export function FileList({ sessionId, path, onDownload }: FileListProps): JSX.Element {
   const entriesMap  = useSftpStore((s) => s.entriesByPath[sessionId] ?? {});
   const tokenMap    = useSftpStore((s) => s.nextTokenByPath[sessionId] ?? {});
   const listDir     = useSftpStore((s) => s.listDir);
   const cd          = useSftpStore((s) => s.cd);
-  const pushToast   = useUIStore((s) => s.pushToast);
 
   // 把 `?? []` 放进 useMemo 避免每次 render 返回新数组触发 exhaustive-deps 警告
   const rawEntries: ReadonlyArray<Entry> = useMemo(
@@ -85,7 +88,11 @@ export function FileList({ sessionId, path }: FileListProps): JSX.Element {
                 cd(sessionId, e.path);
                 void listDir(sessionId, e.path, true);
               } else {
-                pushToast({ level: "info", message: `双击下载: ${e.name}（v0.2 实现）`, durationMs: 2000 });
+                // v0.6.1：双击文件 = 触发下载（v0.5 之前是 toast "v0.2 实现"）。
+                // localPath 兜底 = ~/Downloads/<name>（与 SftpBrowserContent 的
+                // "下载" 按钮行为对齐；后续若引入 OS save dialog 可改成弹框）。
+                const localPath = `~/Downloads/${e.name}`;
+                onDownload?.(sessionId, localPath, e.path);
               }
             }}
           />

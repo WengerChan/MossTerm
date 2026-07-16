@@ -11,10 +11,17 @@
 ## 🎯 用户工作流约定（**核心**）
 
 1. **能分就分**：所有非琐碎任务（>30 行代码改动、跨文件、需要测试）派给 sub-agent（`general` agent），我（主理）只做总集（验证 + dev-log + commit + tag）
+   - **小改（<30 行 / 单文件 / 不需测试）直接自己 Edit**，省去 sub-agent 上下文交接成本
+   - **Edit 优于 Write**：禁止 Write 整文件覆盖（哪怕只改 1 行也走 Edit `old_string` / `new_string` 精准 patch）
+   - **派发 sub-agent 时 prompt 头部显式声明**："禁止 Write 整文件覆盖，必须用 Edit 精准 patch；先 read 上下文再改"
 2. **不主动删已有 stub**：stub 留着，后续接
 3. **文件操作不再询问授权**：工作目录下所有操作默认允许
 4. **每个新版本独立 commit + tag**：tag 形式 `v0.x.y`，commit message 用 Conventional Commits（中文）
+   - **commit 后不做 push、不做 tag push**：由用户自己推到 github（避免误触发 release workflow）
+   - 汇报时说"已 commit `073e251`"而不是"已 push"
 5. **dev-log 写到 `docs/dev-log/v0.x-YYYY-MM-DD.md`**，agent-logs 写到 `docs/agent-logs/`（**两个目录职责不同，别混**）
+6. **候选项要标 plus plan 消耗**（MossTerm 用户身份是 minimax plus plan，2026-07-15 起）：任何提供 ≥2 个候选的场景，**每个选项同步给"预计消耗 plus plan 额度"百分比**；百分比是量级预估（sub-agent 派 1 轮 ≈ 5-8%，本会话完成 ≈ 2-3%，CI 跑一轮 ≈ 1-2%）
+7. **token 不足是正常的**：用户的 plus plan 有上限，sub-agent / 自己 quota 撞上限是正常现象；不去排查其他原因（网络/认证/模型限制等）；用户说"继续"时从上次 token 不足的地方开始接手，像派发 sub-agent 任务一样安排剩下的工作
 
 ## 📊 当前进度
 

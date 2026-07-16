@@ -133,8 +133,14 @@ func (t *dynamicTunnel) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	if ctx != nil {
 		go func() {
-			<-ctx.Done()
-			_ = conn.Close()
+			// v0.6.1 修：之前裸 <-ctx.Done() 在 ctx==Background 时永久泄漏 goroutine。
+			// 加上 t.stopCh 后 Stop 触发也能回收 watcher。
+			select {
+			case <-ctx.Done():
+				_ = conn.Close()
+			case <-t.stopCh:
+				_ = conn.Close()
+			}
 		}()
 	}
 

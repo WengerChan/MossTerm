@@ -116,8 +116,14 @@ func (t *remoteTunnel) handleConn(ctx context.Context, remoteConn net.Conn) {
 
 	if ctx != nil {
 		go func() {
-			<-ctx.Done()
-			_ = remoteConn.Close()
+			// v0.6.1 修：之前裸 <-ctx.Done() 在 ctx==Background 时永久泄漏 goroutine。
+			// 加上 t.stopCh 后 Stop 触发也能回收 watcher。
+			select {
+			case <-ctx.Done():
+				_ = remoteConn.Close()
+			case <-t.stopCh:
+				_ = remoteConn.Close()
+			}
 		}()
 	}
 
