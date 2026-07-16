@@ -52,9 +52,11 @@ import { useUIStore } from "@stores/uiStore";
 import { formatBytes } from "@utils/format";
 import { logger } from "@utils/logger";
 import type { SessionID } from "@/types/session";
+import { PdfRenderer } from "./PdfRenderer";
 import {
   PREVIEW_IMAGE_MAX_BYTES,
   PREVIEW_PDF_MAX_BYTES,
+  PREVIEW_PDF_MAX_FULL_BYTES,
   PREVIEW_TEXT_RENDER_MAX,
   extractPdfTextSnippet,
   hexDump,
@@ -90,7 +92,9 @@ export function PreviewPanel({
   const [textContent, setTextContent] = useState<string | null>(null);
   const [textRaw, setTextRaw] = useState<Uint8Array | null>(null);
   const [textMode, setTextMode] = useState<TextMode>("text");
-  const [pdfInfo, setPdfInfo] = useState<ReturnType<typeof extractPdfTextSnippet> | null>(null);
+  const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
+  // 超大 PDF 用 best-effort 文本片段（不渲染）；null = 不走兜底
+  const [pdfFallback, setPdfFallback] = useState<ReturnType<typeof extractPdfTextSnippet> | null>(null);
   const hasFetchedRef = useRef<string>("");
 
   // 加载预览：先 metadata → 再按 kind 加载内容
@@ -106,7 +110,8 @@ export function PreviewPanel({
       setTextContent(null);
       setTextRaw(null);
       setTextMode("text");
-      setPdfInfo(null);
+      setPdfBytes(null);
+      setPdfFallback(null);
 
       try {
         const meta = await App.SftpGetFileMetadata(sessionID, path);
@@ -126,11 +131,20 @@ export function PreviewPanel({
           setTextRaw(data);
           setTextContent(new TextDecoder("utf-8").decode(data));
         } else if (kind === "pdf") {
-          const size = Math.min(meta.size, PREVIEW_PDF_MAX_BYTES);
-          const data = await App.SftpReadFileChunk(sessionID, path, 0, size);
-          // PDF 内部字节流是 latin1（PDF spec）
-          const raw = new TextDecoder("latin1").decode(data);
-          setPdfInfo(extractPdfTextSnippet(raw));
+          // v0.6.4：≤50MB 走 pdfjs-dist 真实渲染；>50MB 走 best-effort 文本兜底。
+          if (meta.size <= PREVIEW_PDF_MAX_FULL_BYTES) {
+            const data = await App.SftpReadFileChunk(sessionID, path, 0, meta.size);
+            // copy 避免 pdfjs 内部 transfer 后原 buffer 失效
+            setPdfBytes(new Uint8Array(data));
+            setPdfFallback(null);
+          } else {
+            // 超大 PDF：只读头部 2MB 提文本（v0.5.9 best-effort 路径）
+            const headSize = Math.min(meta.size, PREVIEW_PDF_MAX_BYTES);
+            const data = await App.SftpReadFileChunk(sessionID, path, 0, headSize);
+            const raw = new TextDecoder("latin1").decode(data);
+            setPdfFallback(extractPdfTextSnippet(raw));
+            setPdfBytes(null);
+          }
         }
         // binary / toolarge：仅元信息，不读字节
       } catch (err: unknown) {
@@ -232,8 +246,11 @@ export function PreviewPanel({
               meta={load.meta}
             />
           )}
-          {load.phase === "ready" && load.kind === "pdf" && (
-            <PdfView info={pdfInfo} meta={load.meta} />
+          {load.phase === "ready" && load.kind === "pdf" && pdfBytes && (
+            <PdfRenderer data={pdfBytes.buffer.slice(pdfBytes.byteOffset, pdfBytes.byteOffset + pdfBytes.byteLength) as ArrayBuffer} />
+          )}
+          {load.phase === "ready" && load.kind === "pdf" && pdfFallback && (
+            <PdfView info={pdfFallback} meta={load.meta} />
           )}
           {load.phase === "ready" && load.kind === "binary" && (
             <BinaryView meta={load.meta} />

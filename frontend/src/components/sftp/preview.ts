@@ -57,8 +57,11 @@ export const PREVIEW_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 /** 文本预览加载字节数：超过截断显示 */
 export const PREVIEW_TEXT_RENDER_MAX = 256 * 1024;
 
-/** PDF 头部预览字节数：仅用于 best-effort 文本提取 */
+/** PDF 头部预览字节数：仅用于 best-effort 文本提取（v0.5.9 留存） */
 export const PREVIEW_PDF_MAX_BYTES = 2 * 1024 * 1024;
+
+/** PDF 真实渲染加载字节数：v0.6.4 起前端用 pdfjs-dist 完整渲染；超过此值走 toolarge 兜底。 */
+export const PREVIEW_PDF_MAX_FULL_BYTES = 50 * 1024 * 1024;
 
 /** hex dump 渲染最大字节数：超过截断 */
 export const PREVIEW_HEX_DUMP_MAX = 16 * 1024;

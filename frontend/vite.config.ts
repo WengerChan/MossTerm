@@ -58,4 +58,11 @@ export default defineConfig({
   optimizeDeps: {
     include: ["react", "react-dom", "zustand", "@xterm/xterm", "@xterm/addon-fit"],
   },
+
+  // v0.6.4：pdfjs-dist 6.x 的 web worker 在 wails webview（assets:// 协议）
+  // 下走相对路径加载，显式 worker.format='es' + 独立 chunk 避免主 bundle 膨胀。
+  // 注意：workerSrc 在 PdfRenderer 运行时再用 new URL(... import.meta.url) 拼接。
+  worker: {
+    format: "es",
+  },
 });
