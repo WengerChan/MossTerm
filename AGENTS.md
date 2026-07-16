@@ -20,7 +20,14 @@
    - **commit 后不做 push、不做 tag push**：由用户自己推到 github（避免误触发 release workflow）
    - 汇报时说"已 commit `073e251`"而不是"已 push"
 5. **dev-log 写到 `docs/dev-log/v0.x-YYYY-MM-DD.md`**，agent-logs 写到 `docs/agent-logs/`（**两个目录职责不同，别混**）
-6. **候选项要标 plus plan 消耗**（MossTerm 用户身份是 minimax plus plan，2026-07-15 起）：任何提供 ≥2 个候选的场景，**每个选项同步给"预计消耗 plus plan 额度"百分比**；百分比是量级预估（sub-agent 派 1 轮 ≈ 5-8%，本会话完成 ≈ 2-3%，CI 跑一轮 ≈ 1-2%）
+6. **候选项要标 plus plan 消耗**（MossTerm 用户身份是 minimax plus plan，2026-07-15 起，v0.6.1 校准）：任何提供 ≥2 个候选的场景，**每个选项同步给"预计消耗 plus plan 额度"百分比**；百分比是量级预估，**v0.6.0 旧估系统偏高，校准后**：
+   - sub-agent 派 1 轮（小任务）≈ 2-4%（旧估 5-8%）
+   - sub-agent 派 1 轮（复杂任务 / 大量代码）≈ 5-10%（旧估 8-15%）
+   - 我自己 Edit 单文件 <30 行 ≈ 0.5-1%
+   - 我自己 Edit 多文件 ~200 行 ≈ 1-2%（Edit 优先省很多）
+   - CI 跑一轮（5 条工具）≈ 0.3-0.5%
+   - 全套 CI 验证（vet/build/test-race/lint/vulncheck）≈ 1-2%
+   - dev-log 写 ≈ 0.3%
 7. **token 不足是正常的**：用户的 plus plan 有上限，sub-agent / 自己 quota 撞上限是正常现象；不去排查其他原因（网络/认证/模型限制等）；用户说"继续"时从上次 token 不足的地方开始接手，像派发 sub-agent 任务一样安排剩下的工作
 
 ## 📊 当前进度

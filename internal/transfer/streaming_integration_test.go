@@ -30,6 +30,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/mossterm/mossterm/internal/sftpclient"
+	"github.com/mossterm/mossterm/internal/testutil/sftpd"
 )
 
 // -----------------------------------------------------------------------------
@@ -756,5 +757,104 @@ func TestDownload_Integration_Resume(t *testing.T) {
 	sh := sha256.Sum256(srcData)
 	if hex.EncodeToString(gh[:]) != hex.EncodeToString(sh[:]) {
 		t.Errorf("SHA-256 mismatch after resume")
+	}
+}
+
+// -----------------------------------------------------------------------------
+// v0.6.3：真实 OpenSSH sftp-server binary 集成测试
+// -----------------------------------------------------------------------------
+//
+// 区别于本文件前 5 个测试（用 sftp.InMemHandler 走 pkg/sftp 自带 in-process
+// SFTP server，覆盖"协议层"），本测试用 internal/testutil/sftpd 起真实系统
+// sftp-server binary 走 stdin/stdout，覆盖"真实系统权限 / 真实 disk IO 边界
+// / chdir 行为"。
+//
+// sftpd 内部已处理 windows（没 sftp-server binary 时 t.Skip）；此处不再写
+// build tag。
+//
+// 路径用**相对路径**（sftpd 用 sftp-server -d 做 chdir 不 chroot，绝对路径
+// 会落 WorkDir 外）。WorkDir 默认是 t.TempDir()（sftpd 自动 cleanup）。
+func TestUpload_Integration_RealSFTPServer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip in short mode")
+	}
+	const size = 1 * 1024 * 1024 // 1 MiB（轻量；只验"真实 binary 跑通"，不分大文件）
+
+	server := sftpd.Start(t, sftpd.Options{}) // sftpd 内部 t.Skip 如果 binary 不存在
+	manifestDir := t.TempDir()
+
+	// 客户端 dial 跟 streamingSFTPTestServer 那套一致；sftpd 暴露 HostPort / User / Password
+	host, port := server.HostPort()
+	clientCfg := &ssh.ClientConfig{
+		User:            server.User(),
+		Auth:            []ssh.AuthMethod{ssh.Password(server.Password())},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	sshClient, err := ssh.Dial("tcp", addr, clientCfg)
+	if err != nil {
+		t.Fatalf("ssh.Dial: %v", err)
+	}
+	// sftpd 提示：t.Cleanup 注册顺序影响退出 LIFO。先注册 ssh 后注册 sftp，
+	// 测试结束 sftp 先 Close（sftp-server 收到 stdin EOF 退出）→ ssh 后 Close。
+	t.Cleanup(func() { _ = sshClient.Close() })
+
+	cli, err := sftpclient.Open(sshClient)
+	if err != nil {
+		t.Fatalf("sftpclient.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = cli.Close() })
+
+	// 相对路径！sftp-server 落 WorkDir
+	localPath, srcData := writeRandomFile(t, size)
+	remotePath := "realsftp-smoke.bin"
+
+	req := UploadRequest{
+		TransferID:  "tx-realsftp",
+		LocalPath:   localPath,
+		RemotePath:  remotePath,
+		ChunkSize:   1 * 1024 * 1024,
+		Concurrency: 2,
+	}
+	if err := Upload(context.Background(), cli, req, manifestDir, nil); err != nil {
+		t.Fatalf("Upload via real sftp-server: %v", err)
+	}
+	// 关 client 让 sftp-server 进程退出（避免读时占着 SFTP channel）
+	_ = cli.Close()
+
+	// 独立新连接读回（sftpd 提示：先注册 ssh 后注册 sftp 的 Cleanup 顺序）
+	host2, port2 := server.HostPort()
+	addr2 := net.JoinHostPort(host2, strconv.Itoa(port2))
+	sshClient2, err := ssh.Dial("tcp", addr2, clientCfg)
+	if err != nil {
+		t.Fatalf("ssh.Dial (read): %v", err)
+	}
+	t.Cleanup(func() { _ = sshClient2.Close() })
+	cli2, err := sftpclient.Open(sshClient2)
+	if err != nil {
+		t.Fatalf("sftpclient.Open (read): %v", err)
+	}
+	t.Cleanup(func() { _ = cli2.Close() })
+
+	f, err := cli2.Open(remotePath, os.O_RDONLY)
+	if err != nil {
+		t.Fatalf("open remote %s: %v", remotePath, err)
+	}
+	defer f.Close()
+	got, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != size {
+		t.Errorf("size: got %d, want %d", len(got), size)
+	}
+	if !bytes.Equal(got, srcData) {
+		t.Errorf("content mismatch (real sftp-server roundtrip)")
+	}
+	gh := sha256.Sum256(got)
+	sh := sha256.Sum256(srcData)
+	if hex.EncodeToString(gh[:]) != hex.EncodeToString(sh[:]) {
+		t.Errorf("SHA-256 mismatch (real sftp-server roundtrip)")
 	}
 }
