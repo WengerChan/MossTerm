@@ -27,7 +27,7 @@
  *     负责把对应 pane 标 closed
  */
 import { create } from "zustand";
-import { subscribeWithSelector } from "zustand/middleware";
+import { persist, subscribeWithSelector } from "zustand/middleware";
 import type { SessionID, ProfileID } from "@/types/session";
 import {
   addPaneToRoot,
@@ -171,124 +171,191 @@ interface TabsState {
 // =====================================================================
 const newPaneId = (): string => crypto.randomUUID();
 
+/**
+ * v0.6.2：tabs/pane 树持久化（localStorage）。
+ *
+ * 存什么：
+ *   - tabs 数组（id / title / panes 树 / activePaneId）
+ *   - activeTabId
+ *
+ * 不存什么（partialize 时清空 + onRehydrate 时再清一遍兜底）：
+ *   - Tab.sessionId / Tab.state / Tab.profileId
+ *   - Pane.sessionId
+ * 原因：跨进程重启 session 早死（id 失效），引用会导致 UI 调到不存在
+ * 的后端 session。启动时所有 leaf sessionId=null，UI 走"未连接"占位，
+ * 用户重新 open 后再填。
+ *
+ * 升级兼容：name 用 `:v1` 后缀；旧版（无持久化）数据格式不同时改 `v2`。
+ */
+const TABS_PERSIST_KEY = "mossterm:tabs:v1";
+
+/** 清掉运行时字段：tab 顶层 sessionId/state/profileId + pane.sessionId 全部 null。 */
+function stripRuntimeFields(tabs: Tab[]): Tab[] {
+  return tabs.map((t) => ({
+    ...t,
+    sessionId: null,
+    state: "idle",
+    profileId: null,
+    panes: t.panes.map(stripPaneSessionId),
+  }));
+}
+
+function stripPaneSessionId(p: Pane): Pane {
+  if (p.kind === "split") {
+    return { ...p, sessionId: null, children: p.children.map(stripPaneSessionId) };
+  }
+  return { ...p, sessionId: null };
+}
+
 export const useTabsStore = create<TabsState>()(
-  subscribeWithSelector((set, get) => ({
-    tabs: [],
-    activeTabId: null,
+  subscribeWithSelector(
+    persist(
+      (set, get) => ({
+        tabs: [],
+        activeTabId: null,
 
-    addTab: (tab) => {
-      const tabId = newPaneId();
-      const leaf = createLeaf("terminal", null);
-      const newTab: Tab = {
-        ...tab,
-        id: tabId,
-        panes: [leaf],
-        activePaneId: leaf.id,
-      };
-      set((s) => ({ tabs: [...s.tabs, newTab], activeTabId: tabId }));
-      return tabId;
-    },
-
-    removeTab: (id) => {
-      set((s) => {
-        const newTabs = s.tabs.filter((t) => t.id !== id);
-        const newActive =
-          s.activeTabId === id ? (newTabs[0]?.id ?? null) : s.activeTabId;
-        return { tabs: newTabs, activeTabId: newActive };
-      });
-    },
-
-    setActiveTab: (id) => set({ activeTabId: id }),
-
-    updateTab: (id, patch) =>
-      set((s) => ({
-        tabs: s.tabs.map((t) => (t.id === id ? { ...t, ...patch } : t)),
-      })),
-
-    splitPane: (tabId, paneId, direction) => {
-      set((s) => ({
-        tabs: s.tabs.map((t) => {
-          if (t.id !== tabId) return t;
-          return { ...t, panes: splitPaneAt(t.panes, paneId, direction) };
-        }),
-      }));
-    },
-
-    closePane: (tabId, paneId) => {
-      set((s) => {
-        const newTabs: Tab[] = [];
-        for (const t of s.tabs) {
-          if (t.id !== tabId) {
-            newTabs.push(t);
-            continue;
-          }
-          const newPanes = closePaneFromTree(t.panes, paneId);
-          if (newPanes === null) {
-            // 整个 tab 关闭：不 push
-            continue;
-          }
-          // active pane 兜底：若关闭的是 activePaneId，切到剩余的 root leaf
-          let activePaneId = t.activePaneId;
-          if (paneId === activePaneId) {
-            const fallback = newPanes[0];
-            if (fallback) {
-              activePaneId = findFirstLeafId(fallback);
-            }
-          }
-          newTabs.push({ ...t, panes: newPanes, activePaneId });
-        }
-        // 兜底 activeTabId
-        const newActive =
-          s.activeTabId === tabId
-            ? (newTabs[0]?.id ?? null)
-            : s.activeTabId;
-        return { tabs: newTabs, activeTabId: newActive };
-      });
-    },
-
-    setActivePane: (tabId, paneId) =>
-      set((s) => ({
-        tabs: s.tabs.map((t) =>
-          t.id === tabId ? { ...t, activePaneId: paneId } : t,
-        ),
-      })),
-
-    addPaneToTab: (tabId, leaf) => {
-      set((s) => ({
-        tabs: s.tabs.map((t) => {
-          if (t.id !== tabId) return t;
-          return {
-            ...t,
-            panes: addPaneToRoot(t.panes, leaf),
-            activePaneId: leaf.id, // 自动激活新 leaf
+        addTab: (tab) => {
+          const tabId = newPaneId();
+          const leaf = createLeaf("terminal", null);
+          const newTab: Tab = {
+            ...tab,
+            id: tabId,
+            panes: [leaf],
+            activePaneId: leaf.id,
           };
+          set((s) => ({ tabs: [...s.tabs, newTab], activeTabId: tabId }));
+          return tabId;
+        },
+
+        removeTab: (id) => {
+          set((s) => {
+            const newTabs = s.tabs.filter((t) => t.id !== id);
+            const newActive =
+              s.activeTabId === id ? (newTabs[0]?.id ?? null) : s.activeTabId;
+            return { tabs: newTabs, activeTabId: newActive };
+          });
+        },
+
+        setActiveTab: (id) => set({ activeTabId: id }),
+
+        updateTab: (id, patch) =>
+          set((s) => ({
+            tabs: s.tabs.map((t) => (t.id === id ? { ...t, ...patch } : t)),
+          })),
+
+        splitPane: (tabId, paneId, direction) => {
+          set((s) => ({
+            tabs: s.tabs.map((t) => {
+              if (t.id !== tabId) return t;
+              return { ...t, panes: splitPaneAt(t.panes, paneId, direction) };
+            }),
+          }));
+        },
+
+        closePane: (tabId, paneId) => {
+          set((s) => {
+            const newTabs: Tab[] = [];
+            for (const t of s.tabs) {
+              if (t.id !== tabId) {
+                newTabs.push(t);
+                continue;
+              }
+              const newPanes = closePaneFromTree(t.panes, paneId);
+              if (newPanes === null) {
+                // 整个 tab 关闭：不 push
+                continue;
+              }
+              // active pane 兜底：若关闭的是 activePaneId，切到剩余的 root leaf
+              let activePaneId = t.activePaneId;
+              if (paneId === activePaneId) {
+                const fallback = newPanes[0];
+                if (fallback) {
+                  activePaneId = findFirstLeafId(fallback);
+                }
+              }
+              newTabs.push({ ...t, panes: newPanes, activePaneId });
+            }
+            // 兜底 activeTabId
+            const newActive =
+              s.activeTabId === tabId
+                ? (newTabs[0]?.id ?? null)
+                : s.activeTabId;
+            return { tabs: newTabs, activeTabId: newActive };
+          });
+        },
+
+        setActivePane: (tabId, paneId) =>
+          set((s) => ({
+            tabs: s.tabs.map((t) =>
+              t.id === tabId ? { ...t, activePaneId: paneId } : t,
+            ),
+          })),
+
+        addPaneToTab: (tabId, leaf) => {
+          set((s) => ({
+            tabs: s.tabs.map((t) => {
+              if (t.id !== tabId) return t;
+              return {
+                ...t,
+                panes: addPaneToRoot(t.panes, leaf),
+                activePaneId: leaf.id, // 自动激活新 leaf
+              };
+            }),
+          }));
+        },
+
+        addSftpPane: (tabId, sessionId) => {
+          const t: Tab | undefined = get().tabs.find((x) => x.id === tabId);
+          // sessionId 缺省 → 用 tab 自身的 sessionId（如果 tab 已有）
+          const sid = sessionId === undefined ? t?.sessionId ?? null : sessionId;
+          const leaf = createLeaf("sftp", sid);
+          get().addPaneToTab(tabId, leaf);
+          return leaf.id;
+        },
+
+        addTerminalPane: (tabId, sessionId) => {
+          const t: Tab | undefined = get().tabs.find((x) => x.id === tabId);
+          const sid = sessionId === undefined ? t?.sessionId ?? null : sessionId;
+          const leaf = createLeaf("terminal", sid);
+          get().addPaneToTab(tabId, leaf);
+          return leaf.id;
+        },
+
+        tabHasSftpLeaf: (tabId) => {
+          const t = get().tabs.find((x) => x.id === tabId);
+          if (!t) return false;
+          return treeHasLeafOfKind(t.panes, "sftp");
+        },
+      }),
+      {
+        name: TABS_PERSIST_KEY,
+        // 只持久化 tabs 数组 + activeTabId；actions 不存
+        partialize: (state) => ({
+          tabs: stripRuntimeFields(state.tabs),
+          activeTabId: state.activeTabId,
         }),
-      }));
-    },
-
-    addSftpPane: (tabId, sessionId) => {
-      const t: Tab | undefined = get().tabs.find((x) => x.id === tabId);
-      // sessionId 缺省 → 用 tab 自身的 sessionId（如果 tab 已有）
-      const sid = sessionId === undefined ? t?.sessionId ?? null : sessionId;
-      const leaf = createLeaf("sftp", sid);
-      get().addPaneToTab(tabId, leaf);
-      return leaf.id;
-    },
-
-    addTerminalPane: (tabId, sessionId) => {
-      const t: Tab | undefined = get().tabs.find((x) => x.id === tabId);
-      const sid = sessionId === undefined ? t?.sessionId ?? null : sessionId;
-      const leaf = createLeaf("terminal", sid);
-      get().addPaneToTab(tabId, leaf);
-      return leaf.id;
-    },
-
-    tabHasSftpLeaf: (tabId) => {
-      const t = get().tabs.find((x) => x.id === tabId);
-      if (!t) return false;
-      return treeHasLeafOfKind(t.panes, "sftp");
-    },
-  })),
+        // 启动时再清一遍运行时字段（防 v1 之前数据残留 / 手动改 localStorage）
+        onRehydrateStorage: () => (state) => {
+          if (!state) return;
+          state.tabs = stripRuntimeFields(state.tabs);
+        },
+        // 用 JSON storage 走 localStorage（zustand persist 默认；显式写出更清）
+        storage: {
+          getItem: (name) => {
+            const v = localStorage.getItem(name);
+            return v ? JSON.parse(v) : null;
+          },
+          setItem: (name, value) => {
+            localStorage.setItem(name, JSON.stringify(value));
+          },
+          removeItem: (name) => {
+            localStorage.removeItem(name);
+          },
+        },
+        version: 1,
+      },
+    ),
+  ),
 );
 
 // re-export 给外部

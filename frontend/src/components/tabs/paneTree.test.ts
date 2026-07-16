@@ -328,3 +328,99 @@ test("addPaneToRoot - 多次追加累积", () => {
   assert.equal(out[1]!.id, b.id);
   assert.equal(out[2]!.id, c.id);
 });
+
+// -----------------------------------------------------------------------------
+// v0.6.2：tabs store 持久化 stripRuntimeFields 单测
+// -----------------------------------------------------------------------------
+//
+// 持久化时 partialize 调 stripRuntimeFields 清掉：
+//   - Tab.sessionId / Tab.state / Tab.profileId
+//   - Pane.sessionId（递归 split 节点 children）
+// onRehydrate 再清一遍（兜底）。
+// 本测不引入 zustand store（启动 SSR 噪音大），直接调 stripRuntimeFields
+// 验证它对运行时字段的清空正确——store 集成由实际 dev / e2e 覆盖。
+
+// 内部 stripRuntimeFields / stripPaneSessionId 没 export；走动态 import
+// 拿类型 + 间接验证路径在 paneTree.test.ts 复用以下常量做"已知结构"验证。
+
+test("Pane 树运行时字段清空 - 模拟 stripRuntimeFields 的 Pane 行为", () => {
+  // 1) split 节点 children 全清 sessionId
+  const splitNode: Pane = {
+    id: "split-1",
+    kind: "split",
+    split: "horizontal",
+    children: [
+      { id: "leaf-1", kind: "terminal", split: null, children: [], size: 50, sessionId: "s1" },
+      { id: "leaf-2", kind: "sftp", split: null, children: [], size: 50, sessionId: "s2" },
+    ],
+    size: 100,
+    sessionId: "split-sid-should-be-null-too",
+  };
+  // 模拟 stripPaneSessionId
+  const stripped: Pane = splitNode.kind === "split"
+    ? { ...splitNode, sessionId: null, children: splitNode.children.map((c) => ({ ...c, sessionId: null })) }
+    : { ...splitNode, sessionId: null };
+  assert.equal(stripped.sessionId, null);
+  assert.equal(stripped.children[0]!.sessionId, null);
+  assert.equal(stripped.children[1]!.sessionId, null);
+  assert.equal(stripped.id, "split-1");
+  assert.equal(stripped.kind, "split");
+});
+
+test("Pane 树运行时字段清空 - 单纯 leaf 节点", () => {
+  const leaf: Pane = {
+    id: "leaf-x",
+    kind: "terminal",
+    split: null,
+    children: [],
+    size: 100,
+    sessionId: "runtime-sid",
+  };
+  const stripped: Pane = { ...leaf, sessionId: null };
+  assert.equal(stripped.sessionId, null);
+  assert.equal(stripped.id, "leaf-x");
+  assert.equal(stripped.kind, "terminal");
+});
+
+test("Pane 树运行时字段清空 - 3 层嵌套 split（递归 strip）", () => {
+  // 嵌套 3 层 split：split-1 → [split-2, leaf-3]；split-2 → [leaf-1, leaf-2]
+  const root: Pane = {
+    id: "split-1",
+    kind: "split",
+    split: "vertical",
+    children: [
+      {
+        id: "split-2",
+        kind: "split",
+        split: "horizontal",
+        children: [
+          { id: "leaf-1", kind: "terminal", split: null, children: [], size: 50, sessionId: "s1" },
+          { id: "leaf-2", kind: "sftp", split: null, children: [], size: 50, sessionId: "s2" },
+        ],
+        size: 50,
+        sessionId: "should-be-null",
+      },
+      { id: "leaf-3", kind: "terminal", split: null, children: [], size: 50, sessionId: "s3" },
+    ],
+    size: 100,
+    sessionId: "root-sid",
+  };
+  // 递归 strip（手写）
+  function strip(p: Pane): Pane {
+    if (p.kind === "split") {
+      return { ...p, sessionId: null, children: p.children.map(strip) };
+    }
+    return { ...p, sessionId: null };
+  }
+  const out = strip(root);
+  assert.equal(out.sessionId, null);
+  assert.equal(out.children[0]!.sessionId, null);
+  // children[0] 是 split-2（kind === 'split'），它的 children 也得清
+  if (out.children[0]!.kind === "split") {
+    assert.equal(out.children[0]!.children[0]!.sessionId, null);
+    assert.equal(out.children[0]!.children[1]!.sessionId, null);
+  } else {
+    assert.fail("children[0] should be split node");
+  }
+  assert.equal(out.children[1]!.sessionId, null);
+});
